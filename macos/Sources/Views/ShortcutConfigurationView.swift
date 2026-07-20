@@ -280,7 +280,7 @@ private struct ModifierKeycap: View {
             Text(modifier.keyLabel)
                 .font(.subheadline)
                 .bold()
-                .foregroundStyle(isSelected ? .white : .primary)
+                .foregroundStyle(isSelected ? .white : .secondary)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
         .padding(10)
@@ -320,7 +320,9 @@ private struct KeycapButtonStyle: ButtonStyle {
             .frame(maxWidth: .infinity)
             .frame(height: 68)
             .background(
-                isSelected ? AnyShapeStyle(.tint) : AnyShapeStyle(.background.opacity(0.72)),
+                isSelected
+                    ? AnyShapeStyle(.black.opacity(0.68))
+                    : AnyShapeStyle(.gray.opacity(0.12)),
                 in: .rect(cornerRadius: 12)
             )
             .overlay {
