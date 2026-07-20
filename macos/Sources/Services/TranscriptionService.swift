@@ -139,19 +139,32 @@ class TranscriptionService: ObservableObject {
         )
 
         let text = results.map { $0.text }.joined(separator: " ")
-        return postProcess(text)
+        let removeFillerWords = UserDefaults.standard.object(forKey: "removeFillerWords") == nil
+            || UserDefaults.standard.bool(forKey: "removeFillerWords")
+        return TranscriptionPostProcessor.process(
+            text,
+            removeFillerWords: removeFillerWords
+        )
     }
+}
 
-    // MARK: - Post-Processing
-
-    private func postProcess(_ text: String) -> String {
+enum TranscriptionPostProcessor {
+    static func process(_ text: String, removeFillerWords: Bool) -> String {
         var result = text.trimmingCharacters(in: .whitespacesAndNewlines)
 
-        guard UserDefaults.standard.object(forKey: "removeFillerWords") == nil
-            || UserDefaults.standard.bool(forKey: "removeFillerWords")
-        else {
-            return result
+        let trailingNonSpeechPattern =
+            #"(?:\s*(?:\[(?:blank[\s_-]*audio|silence)\]|\((?:blank[\s_-]*audio|silence)\)))+\s*$"#
+        let withoutTrailingNonSpeech = result.replacingOccurrences(
+            of: trailingNonSpeechPattern,
+            with: "",
+            options: [.regularExpression, .caseInsensitive]
+        ).trimmingCharacters(in: .whitespacesAndNewlines)
+
+        if !withoutTrailingNonSpeech.isEmpty {
+            result = withoutTrailingNonSpeech
         }
+
+        guard removeFillerWords else { return result }
 
         let fillerPatterns = [
             "\\b[Uu]m\\b,?\\s?",
@@ -159,9 +172,11 @@ class TranscriptionService: ObservableObject {
         ]
 
         for pattern in fillerPatterns {
-            result =
-                result.replacingOccurrences(
-                    of: pattern, with: "", options: .regularExpression)
+            result = result.replacingOccurrences(
+                of: pattern,
+                with: "",
+                options: .regularExpression
+            )
         }
 
         while result.contains("  ") {
