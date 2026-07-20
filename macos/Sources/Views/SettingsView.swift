@@ -5,32 +5,42 @@ struct SettingsView: View {
     @EnvironmentObject var transcription: TranscriptionService
     @EnvironmentObject var permissions: PermissionManager
     @EnvironmentObject var updates: UpdateService
+    @Environment(ShortcutPreferences.self) private var shortcutPreferences
 
     @AppStorage("removeFillerWords") private var removeFillerWords = true
     @AppStorage(Defaults.showInDock) private var showInDock = true
 
     @State private var launchAtLogin = SMAppService.mainApp.status == .enabled
+    @State private var shortcutEditor: ShortcutEditorModel?
+    @State private var showsMicrophonePermissionError = false
 
     var body: some View {
         Form {
             // Shortcut
             Section {
-                HStack {
-                    Label("Shortcut", systemImage: "keyboard")
-                    Spacer()
-                    Text("Fn (Globe)")
-                        .foregroundStyle(.secondary)
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 4)
-                        .background(.quaternary, in: RoundedRectangle(cornerRadius: 6))
+                Button {
+                    shortcutEditor = ShortcutEditorModel(
+                        configuration: shortcutPreferences.configuration)
+                } label: {
+                    HStack(spacing: 12) {
+                        Label("Shortcut", systemImage: "keyboard")
+                        Spacer()
+                        VStack(alignment: .trailing, spacing: 2) {
+                            Text(shortcutPreferences.configuration.chordSummary)
+                                .foregroundStyle(.primary)
+                                .lineLimit(1)
+                                .truncationMode(.middle)
+                            Text(shortcutPreferences.configuration.behaviorSummary)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .lineLimit(1)
+                        }
+                        Image(systemName: "chevron.right")
+                            .font(.caption)
+                            .foregroundStyle(.tertiary)
+                    }
                 }
-
-                VStack(alignment: .leading, spacing: 4) {
-                    Label("Trigger Modes", systemImage: "hand.tap")
-                    Text("Hold Fn: push-to-talk\nDouble-press Fn: hands-free (press again to stop)")
-                        .font(.caption)
-                        .foregroundStyle(.tertiary)
-                }
+                .buttonStyle(.plain)
             } header: {
                 Text("Input")
             }
@@ -139,7 +149,7 @@ struct SettingsView: View {
                             .foregroundStyle(.green)
                     } else {
                         Button("Grant") {
-                            Task { await permissions.requestMicrophone() }
+                            requestMicrophonePermission()
                         }
                         .buttonStyle(.bordered)
                         .controlSize(.small)
@@ -209,9 +219,35 @@ struct SettingsView: View {
         }
         .formStyle(.grouped)
         .frame(width: 400, height: 520)
+        .sheet(item: $shortcutEditor) { editor in
+            ShortcutConfigurationView(editor: editor) { configuration in
+                shortcutPreferences.apply(configuration)
+            }
+        }
+        .alert(
+            "Microphone Access Required",
+            isPresented: $showsMicrophonePermissionError
+        ) {
+            Button("Close", role: .cancel) {}
+            Button("Open Microphone Settings") {
+                permissions.openMicrophoneSettings()
+            }
+        } message: {
+            Text(
+                "Inputalk could not access the microphone. Allow microphone access in System Settings, then return to Inputalk."
+            )
+        }
     }
 
     // MARK: - Helpers
+
+    private func requestMicrophonePermission() {
+        Task {
+            if await !permissions.requestMicrophone() {
+                showsMicrophonePermissionError = true
+            }
+        }
+    }
 
     private var modelStatusColor: Color {
         switch transcription.modelState {

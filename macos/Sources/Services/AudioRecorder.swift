@@ -2,24 +2,39 @@ import AVFoundation
 import Foundation
 
 /// Thread-safe audio sample collector used by the real-time audio tap.
-/// The tap callback writes samples from the audio thread; the main thread reads on stop.
+/// The audio tap is the analyzer's only writer. The lock protects samples and spectrum snapshots
+/// read by the main thread while recording or stopping.
 private final class AudioSampleCollector: @unchecked Sendable {
     private let lock = NSLock()
+    private let spectrumAnalyzer: AudioSpectrumAnalyzer
     private var samples: ContiguousArray<Float> = []
-    private(set) var latestLevel: Float = 0
+    private var latestSpectrumLevels = AudioSpectrum.silence
 
-    func append(_ newSamples: [Float], level: Float) {
+    init(sampleRate: Float) {
+        spectrumAnalyzer = AudioSpectrumAnalyzer(sampleRate: sampleRate)
+    }
+
+    func append(_ newSamples: [Float]) {
+        let spectrumLevels = spectrumAnalyzer.analyze(newSamples)
+
         lock.lock()
         samples.append(contentsOf: newSamples)
-        latestLevel = level
+        latestSpectrumLevels = spectrumLevels
         lock.unlock()
+    }
+
+    func spectrumLevels() -> [Float] {
+        lock.lock()
+        let result = latestSpectrumLevels
+        lock.unlock()
+        return result
     }
 
     func drain() -> [Float] {
         lock.lock()
         let result = Array(samples)
         samples.removeAll(keepingCapacity: true)
-        latestLevel = 0
+        latestSpectrumLevels = AudioSpectrum.silence
         lock.unlock()
         return result
     }
@@ -27,20 +42,19 @@ private final class AudioSampleCollector: @unchecked Sendable {
     func reset() {
         lock.lock()
         samples.removeAll(keepingCapacity: true)
-        latestLevel = 0
+        latestSpectrumLevels = AudioSpectrum.silence
         lock.unlock()
     }
 }
 
 @MainActor
-class AudioRecorder: ObservableObject {
-    @Published var isRecording = false
-    @Published var audioLevel: Float = 0.0
+final class AudioRecorder {
+    private static let sampleRate: Double = 16_000  // WhisperKit expects 16kHz mono
+
+    private(set) var isRecording = false
 
     private var audioEngine: AVAudioEngine?
-    private let collector = AudioSampleCollector()
-    private let sampleRate: Double = 16000  // WhisperKit expects 16kHz mono
-    private var levelPollTimer: Timer?
+    private let collector = AudioSampleCollector(sampleRate: Float(sampleRate))
 
     func startRecording() throws {
         guard !isRecording else { return }
@@ -52,7 +66,7 @@ class AudioRecorder: ObservableObject {
         guard
             let targetFormat = AVAudioFormat(
                 commonFormat: .pcmFormatFloat32,
-                sampleRate: sampleRate,
+                sampleRate: Self.sampleRate,
                 channels: 1,
                 interleaved: false
             )
@@ -71,37 +85,28 @@ class AudioRecorder: ObservableObject {
             inputFormat: inputFormat,
             targetFormat: targetFormat,
             converter: converter,
-            sampleRate: sampleRate,
+            sampleRate: Self.sampleRate,
             collector: collector
         )
 
         try engine.start()
         audioEngine = engine
         isRecording = true
-
-        // Poll the collector for audio level updates on the main thread
-        levelPollTimer = Timer.scheduledTimer(withTimeInterval: 0.05, repeats: true) {
-            [weak self] _ in
-            guard let self else { return }
-            Task { @MainActor in
-                self.audioLevel = self.collector.latestLevel
-            }
-        }
     }
 
     func stopRecording() -> [Float] {
         guard isRecording else { return [] }
 
-        levelPollTimer?.invalidate()
-        levelPollTimer = nil
-
         audioEngine?.inputNode.removeTap(onBus: 0)
         audioEngine?.stop()
         audioEngine = nil
         isRecording = false
-        audioLevel = 0
 
         return collector.drain()
+    }
+
+    func currentSpectrumLevels() -> [Float] {
+        collector.spectrumLevels()
     }
 
     /// Minimum number of samples for a valid recording (0.5s at 16kHz)
@@ -147,10 +152,7 @@ class AudioRecorder: ObservableObject {
                     count: Int(convertedBuffer.frameLength)
                 ))
 
-            let rms = samples.reduce(Float(0)) { $0 + $1 * $1 }
-            let level = sqrt(rms / max(Float(samples.count), 1))
-
-            collector.append(samples, level: min(level * 5, 1.0))
+            collector.append(samples)
         }
     }
 }

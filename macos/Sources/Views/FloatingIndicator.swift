@@ -1,106 +1,111 @@
+import Observation
 import SwiftUI
 
 enum IndicatorState: Equatable {
-    case recording(level: Float)
+    case recording
     case processing
     case done(text: String)
 }
 
+@MainActor
+@Observable
+final class FloatingIndicatorModel {
+    var state: IndicatorState = .recording
+    var spectrumLevels = AudioSpectrum.silence
+}
+
 struct FloatingIndicatorView: View {
-    let state: IndicatorState
-    @State private var animatingDots = false
-    @State private var pulse = false
+    let model: FloatingIndicatorModel
 
     var body: some View {
-        HStack(spacing: 12) {
-            // Left icon
-            Group {
-                switch state {
-                case .recording:
-                    Circle()
-                        .fill(.red)
-                        .frame(width: 10, height: 10)
-                        .scaleEffect(pulse ? 1.3 : 1.0)
-                        .opacity(pulse ? 0.7 : 1.0)
-                        .animation(
-                            .easeInOut(duration: 0.8).repeatForever(autoreverses: true),
-                            value: pulse
-                        )
-                        .onAppear { pulse = true }
-                case .processing:
-                    ProgressView()
-                        .controlSize(.small)
-                case .done:
-                    Image(systemName: "checkmark.circle.fill")
-                        .foregroundStyle(.green)
-                        .font(.system(size: 16))
-                }
-            }
-            .frame(width: 18)
-
-            // Content
-            switch state {
-            case .recording(let level):
-                // Waveform bars
-                HStack(spacing: 4) {
-                    ForEach(0..<7, id: \.self) { i in
-                        RoundedRectangle(cornerRadius: 2)
-                            .fill(.primary.opacity(0.9))
-                            .frame(width: 4, height: barHeight(for: i, level: level))
-                            .animation(.easeOut(duration: 0.08), value: level)
-                    }
-                }
-                .frame(height: 24)
-
-                Text("Listening...")
-                    .font(.system(size: 14, weight: .medium))
-                    .foregroundStyle(.primary)
+        HStack(spacing: 8) {
+            switch model.state {
+            case .recording:
+                CursorWaveform(levels: model.spectrumLevels)
+                    .transition(.scale(scale: 0.8).combined(with: .opacity))
 
             case .processing:
+                ProgressView()
+                    .controlSize(.small)
+
                 Text("Transcribing")
                     .font(.system(size: 14, weight: .medium))
                     .foregroundStyle(.primary)
-                HStack(spacing: 3) {
-                    ForEach(0..<3, id: \.self) { i in
-                        Circle()
-                            .fill(.primary.opacity(0.6))
-                            .frame(width: 4, height: 4)
-                            .offset(y: animatingDots ? -3 : 3)
-                            .animation(
-                                .easeInOut(duration: 0.4)
-                                    .repeatForever(autoreverses: true)
-                                    .delay(Double(i) * 0.15),
-                                value: animatingDots
-                            )
-                    }
-                }
-                .onAppear { animatingDots = true }
+                    .transition(.move(edge: .trailing).combined(with: .opacity))
 
             case .done(let text):
+                Image(systemName: "checkmark.circle.fill")
+                    .foregroundStyle(.green)
+                    .font(.system(size: 16))
+
                 Text(text)
                     .font(.system(size: 14, weight: .medium))
                     .foregroundStyle(.primary)
                     .lineLimit(1)
                     .truncationMode(.tail)
-                    .frame(maxWidth: 340)
+                    .frame(maxWidth: 300)
+                    .transition(.move(edge: .trailing).combined(with: .opacity))
             }
         }
-        .padding(.horizontal, 20)
-        .padding(.vertical, 14)
+        .padding(.horizontal, model.state == .recording ? 10 : 14)
+        .padding(.vertical, model.state == .recording ? 8 : 10)
         .modifier(GlassCapsuleModifier())
+        .animation(.snappy(duration: 0.24, extraBounce: 0), value: model.state)
+    }
+}
+
+private struct CursorWaveform: View {
+    let levels: [Float]
+
+    var body: some View {
+        HStack(alignment: .center, spacing: 1.5) {
+            ForEach(0..<AudioSpectrum.bandCount, id: \.self) { index in
+                Capsule()
+                    .fill(
+                        LinearGradient(
+                            colors: [.pink, .orange],
+                            startPoint: .bottom,
+                            endPoint: .top
+                        )
+                    )
+                    .frame(width: 2.5, height: barHeight(at: index))
+            }
+        }
+        .frame(width: 23, height: 14)
+        .accessibilityLabel("Recording")
     }
 
-    private func barHeight(for index: Int, level: Float) -> CGFloat {
-        let base: CGFloat = 5
-        let maxExtra: CGFloat = 19
-        // Amplify the level so even quiet speech shows movement
-        let amplified = min(pow(level, 0.5) * 1.5, 1.0)
-        // Each bar has a different phase for a wave-like look
-        let phase = Double(index) * 1.2 + Double(amplified) * 12.0
-        let wave = (sin(phase) + 1) / 2  // 0...1
-        // Even at zero level, bars should jitter slightly when recording
-        let jitter: CGFloat = index % 2 == 0 ? 2 : 0
-        return base + jitter + maxExtra * CGFloat(amplified) * wave
+    private func barHeight(at index: Int) -> CGFloat {
+        let level = levels.indices.contains(index) ? levels[index] : 0
+        return 2 + 12 * CGFloat(level)
+    }
+}
+
+enum FloatingIndicatorPositioner {
+    static func origin(
+        cursor: CGPoint,
+        contentSize: CGSize,
+        visibleFrame: CGRect,
+        gap: CGFloat = 14,
+        margin: CGFloat = 8
+    ) -> CGPoint {
+        var x = cursor.x + gap
+        if x + contentSize.width > visibleFrame.maxX - margin {
+            x = cursor.x - contentSize.width - gap
+        }
+
+        var y = cursor.y - contentSize.height - gap
+        if y < visibleFrame.minY + margin {
+            y = cursor.y + gap
+        }
+
+        let maximumX = max(visibleFrame.minX + margin, visibleFrame.maxX - contentSize.width - margin)
+        let maximumY = max(visibleFrame.minY + margin, visibleFrame.maxY - contentSize.height - margin)
+
+        return CGPoint(
+            x: min(max(x, visibleFrame.minX + margin), maximumX),
+            y: min(max(y, visibleFrame.minY + margin), maximumY)
+        )
     }
 }
 

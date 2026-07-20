@@ -1,5 +1,5 @@
 import AppKit
-import Combine
+import QuartzCore
 import SwiftUI
 
 enum Defaults {
@@ -21,7 +21,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     var statusItem: NSStatusItem!
     let audioRecorder = AudioRecorder()
     let transcriptionService = TranscriptionService()
-    let hotkeyManager = HotkeyManager()
+    let shortcutPreferences = ShortcutPreferences()
+    lazy var hotkeyManager = HotkeyManager(preferences: shortcutPreferences)
     let permissions = PermissionManager.shared
     let updateService = UpdateService()
 
@@ -36,11 +37,18 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     private var indicatorPanel: NSPanel?
     private var indicatorHostingView: NSHostingView<FloatingIndicatorView>?
-    private var audioLevelCancellable: AnyCancellable?
+    private let indicatorModel = FloatingIndicatorModel()
+    private var spectrumSmoother = SpectrumLevelSmoother()
     private var indicatorDismissTask: Task<Void, Never>?
+    private var indicatorDisplayLink: CADisplayLink?
+    private var lastIndicatorFrameTimestamp: CFTimeInterval?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         UserDefaults.standard.register(defaults: [Defaults.showInDock: true])
+
+        shortcutPreferences.onChange = { [weak self] in
+            self?.hotkeyManager.reloadConfiguration()
+        }
 
         setupMainMenu()
         setupMenuBar()
@@ -111,14 +119,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             try audioRecorder.startRecording()
             appState = .recording
             updateMenuBarIcon(state: .recording)
-            showIndicator(state: .recording(level: 0))
-
-            // Subscribe to audio level updates
-            audioLevelCancellable = audioRecorder.$audioLevel
-                .receive(on: RunLoop.main)
-                .sink { [weak self] level in
-                    self?.updateIndicator(state: .recording(level: level))
-                }
+            spectrumSmoother.reset()
+            indicatorModel.spectrumLevels = AudioSpectrum.silence
+            showIndicator(state: .recording)
         } catch {
             print("Failed to start recording: \(error)")
         }
@@ -126,9 +129,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func stopRecordingAndTranscribe() {
         guard audioRecorder.isRecording else { return }
-
-        audioLevelCancellable?.cancel()
-        audioLevelCancellable = nil
 
         let samples = audioRecorder.stopRecording()
         appState = .processing
@@ -173,6 +173,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private func showIndicator(state: IndicatorState) {
         indicatorDismissTask?.cancel()
         indicatorDismissTask = nil
+        indicatorModel.state = state
 
         if indicatorPanel == nil {
             let panel = NSPanel(
@@ -188,49 +189,88 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
             panel.ignoresMouseEvents = true
 
-            let hostingView = NSHostingView(rootView: FloatingIndicatorView(state: state))
+            let hostingView = NSHostingView(rootView: FloatingIndicatorView(model: indicatorModel))
             hostingView.sizingOptions = .intrinsicContentSize
             panel.contentView = hostingView
 
             indicatorPanel = panel
             indicatorHostingView = hostingView
-        } else {
-            indicatorHostingView?.rootView = FloatingIndicatorView(state: state)
         }
 
-        positionIndicatorAtScreenBottom()
+        positionIndicatorNearCursor()
         indicatorPanel?.orderFrontRegardless()
+        startIndicatorTracking()
     }
 
     private func updateIndicator(state: IndicatorState) {
-        indicatorHostingView?.rootView = FloatingIndicatorView(state: state)
-        // Resize in case content changed
-        positionIndicatorAtScreenBottom()
+        indicatorModel.state = state
+        if state != .recording {
+            indicatorModel.spectrumLevels = AudioSpectrum.silence
+        }
+        positionIndicatorNearCursor()
     }
 
     private func dismissIndicator() {
         indicatorDismissTask?.cancel()
         indicatorDismissTask = nil
-        audioLevelCancellable?.cancel()
-        audioLevelCancellable = nil
+        indicatorDisplayLink?.invalidate()
+        indicatorDisplayLink = nil
+        lastIndicatorFrameTimestamp = nil
         indicatorPanel?.orderOut(nil)
     }
 
-    private func positionIndicatorAtScreenBottom() {
+    private func startIndicatorTracking() {
+        guard indicatorDisplayLink == nil, let panel = indicatorPanel else { return }
+
+        let displayLink = panel.displayLink(
+            target: self,
+            selector: #selector(updateIndicatorFrame(_:))
+        )
+        displayLink.add(to: .main, forMode: .common)
+        indicatorDisplayLink = displayLink
+    }
+
+    @objc private func updateIndicatorFrame(_ displayLink: CADisplayLink) {
+        let deltaTime = lastIndicatorFrameTimestamp.map {
+            displayLink.timestamp - $0
+        } ?? displayLink.duration
+        lastIndicatorFrameTimestamp = displayLink.timestamp
+
+        if appState == .recording {
+            indicatorModel.spectrumLevels = spectrumSmoother.update(
+                targetLevels: audioRecorder.currentSpectrumLevels(),
+                deltaTime: deltaTime
+            )
+        }
+
+        positionIndicatorNearCursor()
+    }
+
+    private func positionIndicatorNearCursor() {
         guard let panel = indicatorPanel,
             let hostingView = indicatorHostingView,
-            let screen = NSScreen.main
+            let screen = screenContainingMouse()
         else { return }
 
+        hostingView.layoutSubtreeIfNeeded()
         let contentSize = hostingView.fittingSize
-        let screenFrame = screen.visibleFrame
-        let x = screenFrame.midX - contentSize.width / 2
-        let y = screenFrame.minY + 40  // 40pt above the bottom of the visible area
-
-        panel.setFrame(
-            NSRect(x: x, y: y, width: contentSize.width, height: contentSize.height),
-            display: true
+        let origin = FloatingIndicatorPositioner.origin(
+            cursor: NSEvent.mouseLocation,
+            contentSize: contentSize,
+            visibleFrame: screen.visibleFrame
         )
+        let frame = NSRect(origin: origin, size: contentSize)
+
+        guard panel.frame != frame else { return }
+
+        panel.setFrame(frame, display: true)
+    }
+
+    private func screenContainingMouse() -> NSScreen? {
+        let mouseLocation = NSEvent.mouseLocation
+        return NSScreen.screens.first {
+            NSMouseInRect(mouseLocation, $0.frame, false)
+        } ?? NSScreen.main
     }
 
     // MARK: - Main Menu
@@ -247,6 +287,13 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 title: "About Inputalk",
                 action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)),
                 keyEquivalent: ""))
+        let settingsItem = NSMenuItem(
+            title: "Settings...",
+            action: #selector(showSettingsAction),
+            keyEquivalent: ","
+        )
+        settingsItem.target = self
+        appMenu.addItem(settingsItem)
         appMenu.addItem(.separator())
         appMenu.addItem(
             NSMenuItem(
@@ -318,12 +365,13 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     func updateMenuBarIcon(state: AppState) {
         guard let button = statusItem.button else { return }
         button.image = menuBarImage(for: state)
-        button.contentTintColor = state == .recording ? .systemRed : nil
+        button.contentTintColor = nil
+        button.toolTip = state == .recording ? "Inputalk is recording" : "Inputalk"
     }
 
     private func menuBarImage(for state: AppState) -> NSImage? {
         switch state {
-        case .idle:
+        case .idle, .recording:
             // Custom waveform icon from SPM resource bundle
             if let url = Bundle.module.url(forResource: "MenuBarIcon", withExtension: "png"),
                 let image = NSImage(contentsOf: url)
@@ -336,11 +384,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             let image = NSImage(
                 systemSymbolName: "waveform", accessibilityDescription: "Inputalk")
             image?.isTemplate = true
-            return image
-        case .recording:
-            let image = NSImage(
-                systemSymbolName: "waveform", accessibilityDescription: "Recording")
-            image?.isTemplate = false
             return image
         case .processing:
             let image = NSImage(
@@ -407,6 +450,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                     .environmentObject(transcriptionService)
                     .environmentObject(permissions)
                     .environmentObject(updateService)
+                    .environment(shortcutPreferences)
             )
             window.isReleasedWhenClosed = false
             window.delegate = self
