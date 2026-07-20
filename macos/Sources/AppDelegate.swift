@@ -42,6 +42,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private var indicatorDismissTask: Task<Void, Never>?
     private var indicatorDisplayLink: CADisplayLink?
     private var lastIndicatorFrameTimestamp: CFTimeInterval?
+    private var indicatorNeedsInitialFrame = false
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         UserDefaults.standard.register(defaults: [Defaults.showInDock: true])
@@ -197,6 +198,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             indicatorHostingView = hostingView
         }
 
+        indicatorPanel?.alphaValue = 0
+        indicatorNeedsInitialFrame = true
         positionIndicatorNearCursor()
         indicatorPanel?.orderFrontRegardless()
         startIndicatorTracking()
@@ -217,6 +220,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         indicatorDisplayLink = nil
         lastIndicatorFrameTimestamp = nil
         indicatorPanel?.orderOut(nil)
+        indicatorPanel?.contentView = nil
+        indicatorHostingView = nil
+        indicatorPanel = nil
+        indicatorNeedsInitialFrame = false
     }
 
     private func startIndicatorTracking() {
@@ -244,6 +251,13 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         positionIndicatorNearCursor()
+
+        if indicatorNeedsInitialFrame {
+            indicatorHostingView?.layoutSubtreeIfNeeded()
+            indicatorPanel?.displayIfNeeded()
+            indicatorPanel?.alphaValue = 1
+            indicatorNeedsInitialFrame = false
+        }
     }
 
     private func positionIndicatorNearCursor() {
