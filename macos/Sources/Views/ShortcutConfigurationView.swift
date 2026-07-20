@@ -301,7 +301,7 @@ private struct SpaceKeycap: View {
         }
         .frame(maxWidth: .infinity)
         .frame(height: 68)
-        .background(.background.opacity(0.65), in: .rect(cornerRadius: 12))
+        .background(KeycapAppearance.inactiveBackground, in: .rect(cornerRadius: 12))
         .overlay {
             RoundedRectangle(cornerRadius: 12)
                 .stroke(.separator.opacity(0.7), lineWidth: 1)
@@ -321,8 +321,8 @@ private struct KeycapButtonStyle: ButtonStyle {
             .frame(height: 68)
             .background(
                 isSelected
-                    ? AnyShapeStyle(.black.opacity(0.68))
-                    : AnyShapeStyle(.gray.opacity(0.12)),
+                    ? AnyShapeStyle(KeycapAppearance.selectedBackground)
+                    : AnyShapeStyle(KeycapAppearance.inactiveBackground),
                 in: .rect(cornerRadius: 12)
             )
             .overlay {
@@ -343,6 +343,11 @@ private struct KeycapButtonStyle: ButtonStyle {
             .offset(y: configuration.isPressed ? 1 : 0)
             .animation(.spring(response: 0.18, dampingFraction: 0.78), value: configuration.isPressed)
     }
+}
+
+private enum KeycapAppearance {
+    static let inactiveBackground = Color.gray.opacity(0.12)
+    static let selectedBackground = Color(red: 0.11, green: 0.12, blue: 0.14)
 }
 
 private struct KeyboardKeyRow: Layout {
