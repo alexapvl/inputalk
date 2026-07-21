@@ -129,11 +129,11 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         do {
             var resolution = try audioInputDevices.resolutionForRecording()
             do {
-                try audioRecorder.startRecording(deviceID: resolution.routingDeviceID)
-            } catch AudioRecorderError.deviceRoutingFailed(_) {
+                try audioRecorder.startRecording(deviceUID: resolution.deviceUID)
+            } catch let error as AudioRecorderError where error.shouldTryFallback {
                 resolution = try audioInputDevices.fallbackResolution(
                     preferredName: resolution.name)
-                try audioRecorder.startRecording(deviceID: resolution.routingDeviceID)
+                try audioRecorder.startRecording(deviceUID: resolution.deviceUID)
             }
 
             appState = .recording

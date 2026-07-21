@@ -31,8 +31,7 @@ struct AudioInputFallbackNotice: Equatable, Sendable {
 
 struct AudioInputResolution: Equatable, Sendable {
     let deviceID: AudioDeviceID
-    /// A nil routing ID lets AVAudioEngine follow the current macOS default input.
-    let routingDeviceID: AudioDeviceID?
+    let deviceUID: String
     let name: String
     let fallbackNotice: AudioInputFallbackNotice?
 }
@@ -458,7 +457,7 @@ final class AudioInputDeviceManager: NSObject {
             if let defaultInputDevice {
                 return AudioInputResolution(
                     deviceID: defaultInputDevice.id,
-                    routingDeviceID: nil,
+                    deviceUID: defaultInputDevice.uid,
                     name: defaultInputDevice.name,
                     fallbackNotice: nil
                 )
@@ -468,7 +467,7 @@ final class AudioInputDeviceManager: NSObject {
             }
             return AudioInputResolution(
                 deviceID: firstDevice.id,
-                routingDeviceID: firstDevice.id,
+                deviceUID: firstDevice.uid,
                 name: firstDevice.name,
                 fallbackNotice: AudioInputFallbackNotice(
                     preferredName: "System Default",
@@ -480,7 +479,7 @@ final class AudioInputDeviceManager: NSObject {
             if let selectedDevice {
                 return AudioInputResolution(
                     deviceID: selectedDevice.id,
-                    routingDeviceID: selectedDevice.id,
+                    deviceUID: selectedDevice.uid,
                     name: selectedDevice.name,
                     fallbackNotice: nil
                 )
@@ -493,7 +492,6 @@ final class AudioInputDeviceManager: NSObject {
         guard let fallback = fallbackDevice() else {
             throw AudioInputDeviceManagerError.noInputDevices
         }
-        let usesSystemDefault = fallback.id == defaultInputDeviceID
         let notice = AudioInputFallbackNotice(
             preferredName: preferredName,
             fallbackName: fallback.name
@@ -501,7 +499,7 @@ final class AudioInputDeviceManager: NSObject {
         fallbackNotice = notice
         return AudioInputResolution(
             deviceID: fallback.id,
-            routingDeviceID: usesSystemDefault ? nil : fallback.id,
+            deviceUID: fallback.uid,
             name: fallback.name,
             fallbackNotice: notice
         )

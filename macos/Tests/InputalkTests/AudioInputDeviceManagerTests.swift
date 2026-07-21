@@ -33,7 +33,7 @@ final class AudioInputDeviceManagerTests: XCTestCase {
 
         XCTAssertEqual(manager.selection, .systemDefault)
         XCTAssertEqual(resolution.deviceID, builtIn.id)
-        XCTAssertNil(resolution.routingDeviceID)
+        XCTAssertEqual(resolution.deviceUID, builtIn.uid)
         XCTAssertEqual(resolution.name, builtIn.name)
         XCTAssertNil(resolution.fallbackNotice)
     }
@@ -61,7 +61,7 @@ final class AudioInputDeviceManagerTests: XCTestCase {
 
         XCTAssertEqual(reloaded.selection, .device(uid: usb.uid))
         XCTAssertEqual(resolution.deviceID, usb.id)
-        XCTAssertEqual(resolution.routingDeviceID, usb.id)
+        XCTAssertEqual(resolution.deviceUID, usb.uid)
         XCTAssertEqual(resolution.name, usb.name)
     }
 
@@ -82,7 +82,7 @@ final class AudioInputDeviceManagerTests: XCTestCase {
 
         let resolution = try manager.resolutionForRecording()
 
-        XCTAssertNil(resolution.routingDeviceID)
+        XCTAssertEqual(resolution.deviceUID, builtIn.uid)
         XCTAssertEqual(resolution.name, builtIn.name)
         XCTAssertEqual(
             resolution.fallbackNotice,
@@ -109,7 +109,7 @@ final class AudioInputDeviceManagerTests: XCTestCase {
 
         let resolution = try manager.resolutionForRecording()
 
-        XCTAssertEqual(resolution.routingDeviceID, usb.id)
+        XCTAssertEqual(resolution.deviceUID, usb.uid)
         XCTAssertEqual(resolution.name, usb.name)
         XCTAssertNotNil(resolution.fallbackNotice)
     }
@@ -135,7 +135,7 @@ final class AudioInputDeviceManagerTests: XCTestCase {
         let restoredResolution = try manager.resolutionForRecording()
 
         XCTAssertEqual(manager.selection, .device(uid: usb.uid))
-        XCTAssertEqual(restoredResolution.routingDeviceID, usb.id)
+        XCTAssertEqual(restoredResolution.deviceUID, usb.uid)
         XCTAssertNil(restoredResolution.fallbackNotice)
     }
 
