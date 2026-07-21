@@ -42,10 +42,13 @@ struct SettingsView: View {
                     }
                 }
                 .buttonStyle(.plain)
+                .focusEffectDisabled()
 
                 Picker(selection: audioInputSelection) {
                     Text(audioInputDevices.selectedDefaultLabel)
                         .tag(AudioInputSelection.systemDefault)
+
+                    Divider()
 
                     if case .device(let uid) = audioInputDevices.selection,
                         audioInputDevices.selectedDevice == nil
