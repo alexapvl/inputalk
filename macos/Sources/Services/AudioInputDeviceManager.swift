@@ -55,7 +55,11 @@ final class CoreAudioInputDeviceProvider: AudioInputDeviceProviding {
 
         var seenUIDs = Set<String>()
         return deviceIDs.compactMap { deviceID in
+            // Match macOS's selectable input list instead of exposing private or
+            // app-owned virtual endpoints that merely publish an input stream.
             guard hasInputStreams(deviceID),
+                isAlive(deviceID),
+                canBeDefaultInputDevice(deviceID),
                 let uid = try? stringProperty(
                     objectID: deviceID,
                     selector: kAudioDevicePropertyDeviceUID
@@ -191,6 +195,46 @@ final class CoreAudioInputDeviceProvider: AudioInputDeviceProviding {
             &dataSize
         )
         return status == noErr && dataSize >= MemoryLayout<AudioStreamID>.size
+    }
+
+    private func isAlive(_ deviceID: AudioDeviceID) -> Bool {
+        uint32Property(
+            objectID: deviceID,
+            selector: kAudioDevicePropertyDeviceIsAlive
+        ) == 1
+    }
+
+    private func canBeDefaultInputDevice(_ deviceID: AudioDeviceID) -> Bool {
+        uint32Property(
+            objectID: deviceID,
+            selector: kAudioDevicePropertyDeviceCanBeDefaultDevice,
+            scope: kAudioDevicePropertyScopeInput
+        ) == 1
+    }
+
+    private func uint32Property(
+        objectID: AudioObjectID,
+        selector: AudioObjectPropertySelector,
+        scope: AudioObjectPropertyScope = kAudioObjectPropertyScopeGlobal
+    ) -> UInt32? {
+        var address = AudioObjectPropertyAddress(
+            mSelector: selector,
+            mScope: scope,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        guard AudioObjectHasProperty(objectID, &address) else { return nil }
+
+        var value: UInt32 = 0
+        var dataSize = UInt32(MemoryLayout<UInt32>.size)
+        let status = AudioObjectGetPropertyData(
+            objectID,
+            &address,
+            0,
+            nil,
+            &dataSize,
+            &value
+        )
+        return status == noErr ? value : nil
     }
 
     private func stringProperty(
