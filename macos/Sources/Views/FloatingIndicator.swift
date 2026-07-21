@@ -5,6 +5,7 @@ enum IndicatorState: Equatable {
     case recording
     case processing
     case done(text: String)
+    case warning(text: String)
 }
 
 @MainActor
@@ -12,45 +13,69 @@ enum IndicatorState: Equatable {
 final class FloatingIndicatorModel {
     var state: IndicatorState = .recording
     var spectrumLevels = AudioSpectrum.silence
+    var notice: String?
 }
 
 struct FloatingIndicatorView: View {
     let model: FloatingIndicatorModel
 
     var body: some View {
-        HStack(spacing: 8) {
-            switch model.state {
-            case .recording:
-                CursorWaveform(levels: model.spectrumLevels)
-                    .transition(.scale(scale: 0.8).combined(with: .opacity))
+        VStack(alignment: .leading, spacing: model.notice == nil ? 0 : 5) {
+            HStack(spacing: 8) {
+                switch model.state {
+                case .recording:
+                    CursorWaveform(levels: model.spectrumLevels)
+                        .transition(.scale(scale: 0.8).combined(with: .opacity))
 
-            case .processing:
-                ProgressView()
-                    .controlSize(.small)
+                case .processing:
+                    ProgressView()
+                        .controlSize(.small)
 
-                Text("Transcribing")
-                    .font(.system(size: 14, weight: .medium))
-                    .foregroundStyle(.primary)
-                    .transition(.move(edge: .trailing).combined(with: .opacity))
+                    Text("Transcribing")
+                        .font(.system(size: 14, weight: .medium))
+                        .foregroundStyle(.primary)
+                        .transition(.move(edge: .trailing).combined(with: .opacity))
 
-            case .done(let text):
-                Image(systemName: "checkmark.circle.fill")
-                    .foregroundStyle(.green)
-                    .font(.system(size: 16))
+                case .done(let text):
+                    Image(systemName: "checkmark.circle.fill")
+                        .foregroundStyle(.green)
+                        .font(.system(size: 16))
 
-                Text(text)
-                    .font(.system(size: 14, weight: .medium))
-                    .foregroundStyle(.primary)
-                    .lineLimit(1)
-                    .truncationMode(.tail)
-                    .frame(maxWidth: 300)
-                    .transition(.move(edge: .trailing).combined(with: .opacity))
+                    Text(text)
+                        .font(.system(size: 14, weight: .medium))
+                        .foregroundStyle(.primary)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                        .frame(maxWidth: 300)
+                        .transition(.move(edge: .trailing).combined(with: .opacity))
+
+                case .warning(let text):
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .foregroundStyle(.orange)
+                        .font(.system(size: 16))
+
+                    Text(text)
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundStyle(.primary)
+                        .lineLimit(2)
+                        .frame(maxWidth: 320, alignment: .leading)
+                }
+            }
+
+            if let notice = model.notice {
+                Text(notice)
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+                    .frame(maxWidth: 320, alignment: .leading)
+                    .transition(.move(edge: .top).combined(with: .opacity))
             }
         }
         .padding(.horizontal, model.state == .recording ? 10 : 14)
         .padding(.vertical, model.state == .recording ? 8 : 10)
         .modifier(GlassCapsuleModifier())
         .animation(.snappy(duration: 0.24, extraBounce: 0), value: model.state)
+        .animation(.snappy(duration: 0.24, extraBounce: 0), value: model.notice)
     }
 }
 

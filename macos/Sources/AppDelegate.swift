@@ -1,4 +1,5 @@
 import AppKit
+import CoreAudio
 import QuartzCore
 import SwiftUI
 
@@ -17,9 +18,10 @@ enum AppState {
 // MARK: - App Delegate (Menu Bar App)
 
 @MainActor
-class AppDelegate: NSObject, NSApplicationDelegate {
+class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     var statusItem: NSStatusItem!
     let audioRecorder = AudioRecorder()
+    let audioInputDevices = AudioInputDeviceManager()
     let transcriptionService = TranscriptionService()
     let shortcutPreferences = ShortcutPreferences()
     lazy var hotkeyManager = HotkeyManager(preferences: shortcutPreferences)
@@ -43,12 +45,18 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private var indicatorDisplayLink: CADisplayLink?
     private var lastIndicatorFrameTimestamp: CFTimeInterval?
     private var indicatorNeedsInitialFrame = false
+    private var microphoneMenu: NSMenu?
+    private var activeInputDeviceID: AudioDeviceID?
+    private var activeInputDeviceName: String?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         UserDefaults.standard.register(defaults: [Defaults.showInDock: true])
 
         shortcutPreferences.onChange = { [weak self] in
             self?.hotkeyManager.reloadConfiguration()
+        }
+        audioInputDevices.onDevicesChanged = { [weak self] in
+            self?.handleAudioInputDevicesChanged()
         }
 
         setupMainMenu()
@@ -116,15 +124,29 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     // MARK: - Recording Flow
 
     private func startRecording() {
+        indicatorModel.notice = nil
+
         do {
-            try audioRecorder.startRecording()
+            var resolution = try audioInputDevices.resolutionForRecording()
+            do {
+                try audioRecorder.startRecording(deviceID: resolution.routingDeviceID)
+            } catch AudioRecorderError.deviceRoutingFailed(_) {
+                resolution = try audioInputDevices.fallbackResolution(
+                    preferredName: resolution.name)
+                try audioRecorder.startRecording(deviceID: resolution.routingDeviceID)
+            }
+
             appState = .recording
             updateMenuBarIcon(state: .recording)
             spectrumSmoother.reset()
             indicatorModel.spectrumLevels = AudioSpectrum.silence
             showIndicator(state: .recording)
+            indicatorModel.notice = resolution.fallbackNotice?.message
+            activeInputDeviceID = resolution.deviceID
+            activeInputDeviceName = resolution.name
         } catch {
             print("Failed to start recording: \(error)")
+            showTransientWarning(error.localizedDescription)
         }
     }
 
@@ -132,13 +154,19 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         guard audioRecorder.isRecording else { return }
 
         let samples = audioRecorder.stopRecording()
+        activeInputDeviceID = nil
+        activeInputDeviceName = nil
         appState = .processing
         updateMenuBarIcon(state: .processing)
 
         guard samples.count >= AudioRecorder.minimumSamples else {
             appState = .idle
             updateMenuBarIcon(state: .idle)
-            dismissIndicator()
+            if let notice = indicatorModel.notice {
+                showTransientWarning(notice)
+            } else {
+                dismissIndicator()
+            }
             return
         }
 
@@ -152,8 +180,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 if !text.isEmpty {
                     TextInserter.insertText(text)
                     updateIndicator(state: .done(text: text))
+                    let dismissalDelay = indicatorModel.notice == nil ? 1.5 : 4
                     indicatorDismissTask = Task {
-                        try? await Task.sleep(nanoseconds: 1_500_000_000)
+                        try? await Task.sleep(for: .seconds(dismissalDelay))
                         dismissIndicator()
                     }
                 } else {
@@ -166,6 +195,32 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
             appState = .idle
             updateMenuBarIcon(state: .idle)
+        }
+    }
+
+    private func handleAudioInputDevicesChanged() {
+        guard audioRecorder.isRecording,
+            let activeInputDeviceID,
+            !audioInputDevices.devices.contains(where: { $0.id == activeInputDeviceID })
+        else { return }
+
+        let disconnectedName = activeInputDeviceName ?? "Microphone"
+        if let fallbackName = audioInputDevices.fallbackDeviceName {
+            indicatorModel.notice =
+                "\(disconnectedName) disconnected. Recording stopped. Next recording will use \(fallbackName)."
+        } else {
+            indicatorModel.notice =
+                "\(disconnectedName) disconnected. Recording stopped. No fallback microphone is available."
+        }
+        stopRecordingAndTranscribe()
+    }
+
+    private func showTransientWarning(_ message: String) {
+        indicatorModel.notice = nil
+        showIndicator(state: .warning(text: message))
+        indicatorDismissTask = Task {
+            try? await Task.sleep(for: .seconds(4))
+            dismissIndicator()
         }
     }
 
@@ -224,6 +279,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         indicatorHostingView = nil
         indicatorPanel = nil
         indicatorNeedsInitialFrame = false
+        indicatorModel.notice = nil
     }
 
     private func startIndicatorTracking() {
@@ -415,6 +471,17 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private func showContextMenu() {
         let menu = NSMenu()
 
+        let microphoneItem = NSMenuItem(
+            title: "Microphone", action: nil, keyEquivalent: "")
+        let microphoneMenu = NSMenu(title: "Microphone")
+        microphoneMenu.delegate = self
+        microphoneItem.submenu = microphoneMenu
+        menu.addItem(microphoneItem)
+        self.microphoneMenu = microphoneMenu
+        rebuildMicrophoneMenu(microphoneMenu)
+
+        menu.addItem(NSMenuItem.separator())
+
         let settingsItem = NSMenuItem(
             title: "Settings...", action: #selector(showSettingsAction), keyEquivalent: ",")
         settingsItem.target = self
@@ -436,6 +503,91 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         statusItem.menu = menu
         statusItem.button?.performClick(nil)
         statusItem.menu = nil
+        self.microphoneMenu = nil
+    }
+
+    func menuWillOpen(_ menu: NSMenu) {
+        guard menu === microphoneMenu else { return }
+        audioInputDevices.refresh()
+        rebuildMicrophoneMenu(menu)
+    }
+
+    private func rebuildMicrophoneMenu(_ menu: NSMenu) {
+        menu.removeAllItems()
+        let canChangeDevice = appState != .recording
+
+        let systemDefaultItem = NSMenuItem(
+            title: audioInputDevices.selectedDefaultLabel,
+            action: #selector(selectMicrophoneFromMenu(_:)),
+            keyEquivalent: ""
+        )
+        systemDefaultItem.target = self
+        systemDefaultItem.state = audioInputDevices.selection == .systemDefault ? .on : .off
+        systemDefaultItem.isEnabled = canChangeDevice
+        menu.addItem(systemDefaultItem)
+        menu.addItem(.separator())
+
+        for device in audioInputDevices.devices {
+            let item = NSMenuItem(
+                title: device.name,
+                action: #selector(selectMicrophoneFromMenu(_:)),
+                keyEquivalent: ""
+            )
+            item.target = self
+            item.representedObject = device.uid
+            item.state = audioInputDevices.selection == .device(uid: device.uid) ? .on : .off
+            item.isEnabled = canChangeDevice
+            menu.addItem(item)
+        }
+
+        if audioInputDevices.devices.isEmpty {
+            let unavailableItem = NSMenuItem(
+                title: "No microphones available", action: nil, keyEquivalent: "")
+            unavailableItem.isEnabled = false
+            menu.addItem(unavailableItem)
+        } else if case .device(let uid) = audioInputDevices.selection,
+            audioInputDevices.selectedDevice == nil
+        {
+            let unavailableItem = NSMenuItem(
+                title: "\(audioInputDevices.selectedDeviceName) (Unavailable)",
+                action: nil,
+                keyEquivalent: ""
+            )
+            unavailableItem.state = .on
+            unavailableItem.isEnabled = false
+            unavailableItem.representedObject = uid
+            menu.addItem(unavailableItem)
+        }
+
+        if audioInputDevices.unavailableSelectionMessage != nil,
+            let fallbackName = audioInputDevices.fallbackDeviceName
+        {
+            menu.addItem(.separator())
+            let statusItem = NSMenuItem(
+                title: "Using \(fallbackName) as fallback",
+                action: nil,
+                keyEquivalent: ""
+            )
+            statusItem.isEnabled = false
+            menu.addItem(statusItem)
+        } else if appState == .recording {
+            menu.addItem(.separator())
+            let statusItem = NSMenuItem(
+                title: "Stop recording before switching microphones",
+                action: nil,
+                keyEquivalent: ""
+            )
+            statusItem.isEnabled = false
+            menu.addItem(statusItem)
+        }
+    }
+
+    @objc private func selectMicrophoneFromMenu(_ sender: NSMenuItem) {
+        if let uid = sender.representedObject as? String {
+            audioInputDevices.select(.device(uid: uid))
+        } else {
+            audioInputDevices.select(.systemDefault)
+        }
     }
 
     // MARK: - Windows
@@ -465,6 +617,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                     .environmentObject(permissions)
                     .environmentObject(updateService)
                     .environment(shortcutPreferences)
+                    .environment(audioInputDevices)
             )
             window.isReleasedWhenClosed = false
             window.delegate = self

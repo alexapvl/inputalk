@@ -6,6 +6,7 @@ struct SettingsView: View {
     @EnvironmentObject var permissions: PermissionManager
     @EnvironmentObject var updates: UpdateService
     @Environment(ShortcutPreferences.self) private var shortcutPreferences
+    @Environment(AudioInputDeviceManager.self) private var audioInputDevices
 
     @AppStorage("removeFillerWords") private var removeFillerWords = true
     @AppStorage(Defaults.showInDock) private var showInDock = true
@@ -41,6 +42,35 @@ struct SettingsView: View {
                     }
                 }
                 .buttonStyle(.plain)
+
+                Picker(selection: audioInputSelection) {
+                    Text(audioInputDevices.selectedDefaultLabel)
+                        .tag(AudioInputSelection.systemDefault)
+
+                    if case .device(let uid) = audioInputDevices.selection,
+                        audioInputDevices.selectedDevice == nil
+                    {
+                        Text("\(audioInputDevices.selectedDeviceName) (Unavailable)")
+                            .tag(AudioInputSelection.device(uid: uid))
+                    }
+
+                    ForEach(audioInputDevices.devices) { device in
+                        Text(device.name)
+                            .tag(AudioInputSelection.device(uid: device.uid))
+                    }
+                } label: {
+                    Label("Microphone", systemImage: "mic")
+                }
+
+                if let message = audioInputDevices.unavailableSelectionMessage {
+                    Label(message, systemImage: "exclamationmark.triangle.fill")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                } else if let error = audioInputDevices.refreshError {
+                    Label(error, systemImage: "exclamationmark.triangle.fill")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                }
             } header: {
                 Text("Input")
             }
@@ -219,6 +249,9 @@ struct SettingsView: View {
         }
         .formStyle(.grouped)
         .frame(width: 400, height: 520)
+        .onAppear {
+            audioInputDevices.refresh()
+        }
         .sheet(item: $shortcutEditor) { editor in
             ShortcutConfigurationView(editor: editor) { configuration in
                 shortcutPreferences.apply(configuration)
@@ -247,6 +280,13 @@ struct SettingsView: View {
                 showsMicrophonePermissionError = true
             }
         }
+    }
+
+    private var audioInputSelection: Binding<AudioInputSelection> {
+        Binding(
+            get: { audioInputDevices.selection },
+            set: { audioInputDevices.select($0) }
+        )
     }
 
     private var modelStatusColor: Color {

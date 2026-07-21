@@ -1,4 +1,5 @@
 import AVFoundation
+import AudioToolbox
 import Foundation
 
 /// Thread-safe audio sample collector used by the real-time audio tap.
@@ -56,11 +57,14 @@ final class AudioRecorder {
     private var audioEngine: AVAudioEngine?
     private let collector = AudioSampleCollector(sampleRate: Float(sampleRate))
 
-    func startRecording() throws {
+    func startRecording(deviceID: AudioDeviceID? = nil) throws {
         guard !isRecording else { return }
 
         let engine = AVAudioEngine()
         let inputNode = engine.inputNode
+        if let deviceID {
+            try Self.route(inputNode, to: deviceID)
+        }
         let inputFormat = inputNode.outputFormat(forBus: 0)
 
         guard
@@ -112,6 +116,28 @@ final class AudioRecorder {
     /// Minimum number of samples for a valid recording (0.5s at 16kHz)
     static let minimumSamples = 8000
 
+    nonisolated private static func route(
+        _ inputNode: AVAudioInputNode,
+        to deviceID: AudioDeviceID
+    ) throws {
+        guard let audioUnit = inputNode.audioUnit else {
+            throw AudioRecorderError.missingInputAudioUnit
+        }
+
+        var deviceID = deviceID
+        let status = AudioUnitSetProperty(
+            audioUnit,
+            kAudioOutputUnitProperty_CurrentDevice,
+            kAudioUnitScope_Global,
+            0,
+            &deviceID,
+            UInt32(MemoryLayout<AudioDeviceID>.size)
+        )
+        guard status == noErr else {
+            throw AudioRecorderError.deviceRoutingFailed(status)
+        }
+    }
+
     /// Installs the audio tap in a nonisolated context so the closure
     /// does not inherit @MainActor isolation (which would crash on the audio thread).
     nonisolated private static func installAudioTap(
@@ -160,11 +186,16 @@ final class AudioRecorder {
 enum AudioRecorderError: LocalizedError {
     case formatError
     case converterError
+    case missingInputAudioUnit
+    case deviceRoutingFailed(OSStatus)
 
     var errorDescription: String? {
         switch self {
         case .formatError: return "Failed to create audio format"
         case .converterError: return "Failed to create audio converter"
+        case .missingInputAudioUnit: return "Failed to access the microphone audio unit"
+        case .deviceRoutingFailed(let status):
+            return "Failed to select the microphone (CoreAudio error \(status))"
         }
     }
 }
