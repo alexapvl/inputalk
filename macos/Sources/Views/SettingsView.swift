@@ -135,28 +135,36 @@ struct SettingsView: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 } else {
-                    ForEach(transcriptionHistory.entries) { entry in
-                        HStack(alignment: .top, spacing: 12) {
-                            VStack(alignment: .leading, spacing: 4) {
-                                Text(entry.text)
-                                    .font(.body)
-                                    .lineLimit(3)
-                                    .textSelection(.enabled)
-                                Text(entry.createdAt, format: .relative(presentation: .named))
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
+                    ScrollView {
+                        LazyVStack(spacing: 8) {
+                            ForEach(transcriptionHistory.entries) { entry in
+                                HStack(alignment: .top, spacing: 12) {
+                                    VStack(alignment: .leading, spacing: 4) {
+                                        Text(entry.text)
+                                            .font(.body)
+                                            .lineLimit(3)
+                                            .textSelection(.enabled)
+                                        Text(
+                                            entry.createdAt,
+                                            format: .relative(presentation: .named)
+                                        )
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                    }
+                                    Spacer(minLength: 8)
+                                    Button(copiedEntryID == entry.id ? "Copied" : "Copy") {
+                                        copyHistoryEntry(entry)
+                                    }
+                                    .buttonStyle(.bordered)
+                                    .controlSize(.small)
+                                    .disabled(copiedEntryID == entry.id)
+                                }
+                                .padding(.vertical, 2)
                             }
-                            Spacer(minLength: 8)
-                            Button(copiedEntryID == entry.id ? "Copied" : "Copy") {
-                                copyHistoryEntry(entry)
-                            }
-                            .buttonStyle(.bordered)
-                            .controlSize(.small)
-                            .disabled(copiedEntryID == entry.id)
+                            .onDelete(perform: deleteHistoryEntries)
                         }
-                        .padding(.vertical, 2)
                     }
-                    .onDelete(perform: deleteHistoryEntries)
+                    .frame(maxHeight: 240)
 
                     Button("Clear History", role: .destructive) {
                         transcriptionHistory.clear()

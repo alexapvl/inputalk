@@ -44,10 +44,12 @@ final class TranscriptionHistoryStore {
         load()
     }
 
-    /// Saves every non-empty transcript, newest first, capped at `maxEntries`.
+    /// Saves every meaningful transcript, newest first, capped at `maxEntries`.
     func append(_ text: String) {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return }
+        guard !trimmed.isEmpty,
+            !TranscriptionPostProcessor.isBlankAudio(trimmed)
+        else { return }
 
         let entry = TranscriptionHistoryEntry(
             id: UUID(),

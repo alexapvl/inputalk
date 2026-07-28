@@ -149,6 +149,13 @@ class TranscriptionService: ObservableObject {
 }
 
 enum TranscriptionPostProcessor {
+    static func isBlankAudio(_ text: String) -> Bool {
+        text.range(
+            of: #"^\s*[\[(]blank[\s_-]*audio[\])]\s*$"#,
+            options: [.regularExpression, .caseInsensitive]
+        ) != nil
+    }
+
     static func process(_ text: String, removeFillerWords: Bool) -> String {
         var result = text.trimmingCharacters(in: .whitespacesAndNewlines)
 

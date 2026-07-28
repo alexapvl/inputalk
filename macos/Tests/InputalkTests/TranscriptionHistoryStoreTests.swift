@@ -4,13 +4,14 @@ import XCTest
 
 @MainActor
 final class TranscriptionHistoryStoreTests: XCTestCase {
-    func testAppendIgnoresEmptyOrWhitespaceText() throws {
+    func testAppendIgnoresEmptyWhitespaceOrBlankAudioText() throws {
         let fileURL = temporaryHistoryURL()
         defer { try? FileManager.default.removeItem(at: fileURL) }
 
         let store = TranscriptionHistoryStore(fileURL: fileURL)
         store.append("")
         store.append("   \n\t")
+        store.append("[BLANK_AUDIO]")
         XCTAssertTrue(store.entries.isEmpty)
     }
 

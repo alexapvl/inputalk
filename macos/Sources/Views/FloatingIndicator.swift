@@ -51,7 +51,7 @@ struct FloatingIndicatorView: View {
 
                 case .warning(let text):
                     Image(systemName: "exclamationmark.triangle.fill")
-                        .foregroundStyle(.orange)
+                        .foregroundStyle(.yellow)
                         .font(.system(size: 16))
 
                     Text(text)

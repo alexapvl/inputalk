@@ -22,6 +22,12 @@ final class TranscriptionPostProcessorTests: XCTestCase {
         )
     }
 
+    func testRecognizesBlankAudioOutput() {
+        XCTAssertTrue(TranscriptionPostProcessor.isBlankAudio("[BLANK_AUDIO]"))
+        XCTAssertTrue(TranscriptionPostProcessor.isBlankAudio(" (blank audio) "))
+        XCTAssertFalse(TranscriptionPostProcessor.isBlankAudio("blank audio"))
+    }
+
     func testKeepsBlankAudioWhenItIsOnlyOutput() {
         XCTAssertEqual(
             TranscriptionPostProcessor.process(
