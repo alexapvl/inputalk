@@ -12,6 +12,7 @@ struct SettingsView: View {
 
     @AppStorage("removeFillerWords") private var removeFillerWords = true
     @AppStorage(Defaults.showInDock) private var showInDock = true
+    @AppStorage(Defaults.pasteHistoryFromMenuBar) private var pasteHistoryFromMenuBar = true
 
     @State private var launchAtLogin = SMAppService.mainApp.status == .enabled
     @State private var shortcutEditor: ShortcutEditorModel?
@@ -125,6 +126,10 @@ struct SettingsView: View {
 
             // History
             Section {
+                Toggle(isOn: $pasteHistoryFromMenuBar) {
+                    Label("Paste from menu bar", systemImage: "doc.on.clipboard")
+                }
+
                 if transcriptionHistory.entries.isEmpty {
                     Text("Transcripts you dictate will show up here so you can copy them later.")
                         .font(.caption)
@@ -161,9 +166,11 @@ struct SettingsView: View {
             } header: {
                 Text("History")
             } footer: {
-                if !transcriptionHistory.entries.isEmpty {
-                    Text("Keeps the last \(TranscriptionHistoryStore.maxEntries) transcripts on this Mac.")
-                }
+                Text(
+                    pasteHistoryFromMenuBar
+                        ? "Menu bar History copies and pastes into the frontmost app. Settings Copy only puts text on the clipboard. Keeps the last \(TranscriptionHistoryStore.maxEntries) transcripts."
+                        : "Menu bar History and Settings Copy only put text on the clipboard. Keeps the last \(TranscriptionHistoryStore.maxEntries) transcripts."
+                )
             }
 
             // General
@@ -333,9 +340,7 @@ struct SettingsView: View {
     }
 
     private func copyHistoryEntry(_ entry: TranscriptionHistoryEntry) {
-        let pasteboard = NSPasteboard.general
-        pasteboard.clearContents()
-        pasteboard.setString(entry.text, forType: .string)
+        transcriptionHistory.copyToPasteboard(entry)
 
         copiedResetTask?.cancel()
         copiedEntryID = entry.id

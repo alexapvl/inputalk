@@ -5,6 +5,7 @@ import SwiftUI
 
 enum Defaults {
     static let showInDock = "showInDock"
+    static let pasteHistoryFromMenuBar = "pasteHistoryFromMenuBar"
 }
 
 // MARK: - App State
@@ -51,7 +52,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var activeInputDeviceName: String?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        UserDefaults.standard.register(defaults: [Defaults.showInDock: true])
+        UserDefaults.standard.register(defaults: [
+            Defaults.showInDock: true,
+            Defaults.pasteHistoryFromMenuBar: true,
+        ])
 
         shortcutPreferences.onChange = { [weak self] in
             self?.hotkeyManager.reloadConfiguration()
@@ -484,6 +488,14 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         menu.addItem(NSMenuItem.separator())
 
+        let historyItem = NSMenuItem(title: "History", action: nil, keyEquivalent: "")
+        let historyMenu = NSMenu(title: "History")
+        rebuildHistoryMenu(historyMenu)
+        historyItem.submenu = historyMenu
+        menu.addItem(historyItem)
+
+        menu.addItem(NSMenuItem.separator())
+
         let settingsItem = NSMenuItem(
             title: "Settings...", action: #selector(showSettingsAction), keyEquivalent: ",")
         settingsItem.target = self
@@ -590,6 +602,42 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         } else {
             audioInputDevices.select(.systemDefault)
         }
+    }
+
+    private func rebuildHistoryMenu(_ menu: NSMenu) {
+        menu.removeAllItems()
+
+        let recent = Array(transcriptionHistory.entries.prefix(5))
+        guard !recent.isEmpty else {
+            let emptyItem = NSMenuItem(
+                title: "No transcripts yet", action: nil, keyEquivalent: "")
+            emptyItem.isEnabled = false
+            menu.addItem(emptyItem)
+            return
+        }
+
+        for entry in recent {
+            let item = NSMenuItem(
+                title: TranscriptionHistoryStore.menuTitle(for: entry.text),
+                action: #selector(copyHistoryFromMenu(_:)),
+                keyEquivalent: ""
+            )
+            item.target = self
+            item.representedObject = entry.id
+            item.toolTip = entry.text
+            menu.addItem(item)
+        }
+    }
+
+    @objc private func copyHistoryFromMenu(_ sender: NSMenuItem) {
+        guard let id = sender.representedObject as? UUID,
+            let entry = transcriptionHistory.entries.first(where: { $0.id == id })
+        else { return }
+
+        transcriptionHistory.copyToPasteboard(entry)
+
+        guard UserDefaults.standard.bool(forKey: Defaults.pasteHistoryFromMenuBar) else { return }
+        TextInserter.insertText(entry.text)
     }
 
     // MARK: - Windows

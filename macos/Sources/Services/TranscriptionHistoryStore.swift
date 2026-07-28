@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 
 struct TranscriptionHistoryEntry: Identifiable, Codable, Equatable, Sendable {
@@ -71,6 +72,21 @@ final class TranscriptionHistoryStore {
         guard !entries.isEmpty else { return }
         entries = []
         save()
+    }
+
+    func copyToPasteboard(_ entry: TranscriptionHistoryEntry) {
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        pasteboard.setString(entry.text, forType: .string)
+    }
+
+    /// Single-line title for menu items, truncated with `...` when too long.
+    static func menuTitle(for text: String, maxCharacters: Int = 56) -> String {
+        let singleLine = text
+            .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard singleLine.count > maxCharacters else { return singleLine }
+        return String(singleLine.prefix(maxCharacters - 3)) + "..."
     }
 
     private func load() {

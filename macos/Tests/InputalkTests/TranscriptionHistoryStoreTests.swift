@@ -64,6 +64,20 @@ final class TranscriptionHistoryStoreTests: XCTestCase {
         XCTAssertTrue(reloaded.entries.isEmpty)
     }
 
+    func testMenuTitleCollapsesWhitespaceAndTruncates() {
+        XCTAssertEqual(
+            TranscriptionHistoryStore.menuTitle(for: "hello\n  world", maxCharacters: 56),
+            "hello world"
+        )
+        XCTAssertEqual(
+            TranscriptionHistoryStore.menuTitle(
+                for: String(repeating: "a", count: 60),
+                maxCharacters: 20
+            ),
+            String(repeating: "a", count: 17) + "..."
+        )
+    }
+
     private func temporaryHistoryURL() -> URL {
         FileManager.default.temporaryDirectory
             .appendingPathComponent("inputalk-history-\(UUID().uuidString).json")
