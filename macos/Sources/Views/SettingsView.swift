@@ -1,3 +1,4 @@
+import AppKit
 import ServiceManagement
 import SwiftUI
 
@@ -7,6 +8,7 @@ struct SettingsView: View {
     @EnvironmentObject var updates: UpdateService
     @Environment(ShortcutPreferences.self) private var shortcutPreferences
     @Environment(AudioInputDeviceManager.self) private var audioInputDevices
+    @Environment(TranscriptionHistoryStore.self) private var transcriptionHistory
 
     @AppStorage("removeFillerWords") private var removeFillerWords = true
     @AppStorage(Defaults.showInDock) private var showInDock = true
@@ -14,6 +16,8 @@ struct SettingsView: View {
     @State private var launchAtLogin = SMAppService.mainApp.status == .enabled
     @State private var shortcutEditor: ShortcutEditorModel?
     @State private var showsMicrophonePermissionError = false
+    @State private var copiedEntryID: UUID?
+    @State private var copiedResetTask: Task<Void, Never>?
 
     var body: some View {
         Form {
@@ -117,6 +121,49 @@ struct SettingsView: View {
                 }
             } header: {
                 Text("Post-processing")
+            }
+
+            // History
+            Section {
+                if transcriptionHistory.entries.isEmpty {
+                    Text("Transcripts you dictate will show up here so you can copy them later.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                } else {
+                    ForEach(transcriptionHistory.entries) { entry in
+                        HStack(alignment: .top, spacing: 12) {
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text(entry.text)
+                                    .font(.body)
+                                    .lineLimit(3)
+                                    .textSelection(.enabled)
+                                Text(entry.createdAt, format: .relative(presentation: .named))
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                            Spacer(minLength: 8)
+                            Button(copiedEntryID == entry.id ? "Copied" : "Copy") {
+                                copyHistoryEntry(entry)
+                            }
+                            .buttonStyle(.bordered)
+                            .controlSize(.small)
+                            .disabled(copiedEntryID == entry.id)
+                        }
+                        .padding(.vertical, 2)
+                    }
+                    .onDelete(perform: deleteHistoryEntries)
+
+                    Button("Clear History", role: .destructive) {
+                        transcriptionHistory.clear()
+                        copiedEntryID = nil
+                    }
+                }
+            } header: {
+                Text("History")
+            } footer: {
+                if !transcriptionHistory.entries.isEmpty {
+                    Text("Keeps the last \(TranscriptionHistoryStore.maxEntries) transcripts on this Mac.")
+                }
             }
 
             // General
@@ -282,6 +329,32 @@ struct SettingsView: View {
             if await !permissions.requestMicrophone() {
                 showsMicrophonePermissionError = true
             }
+        }
+    }
+
+    private func copyHistoryEntry(_ entry: TranscriptionHistoryEntry) {
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        pasteboard.setString(entry.text, forType: .string)
+
+        copiedResetTask?.cancel()
+        copiedEntryID = entry.id
+        copiedResetTask = Task {
+            try? await Task.sleep(for: .seconds(1.5))
+            guard !Task.isCancelled else { return }
+            if copiedEntryID == entry.id {
+                copiedEntryID = nil
+            }
+        }
+    }
+
+    private func deleteHistoryEntries(at offsets: IndexSet) {
+        let ids = offsets.map { transcriptionHistory.entries[$0].id }
+        for id in ids {
+            transcriptionHistory.remove(id: id)
+        }
+        if let copiedEntryID, ids.contains(copiedEntryID) {
+            self.copiedEntryID = nil
         }
     }
 

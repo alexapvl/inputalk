@@ -23,6 +23,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     let audioRecorder = AudioRecorder()
     let audioInputDevices = AudioInputDeviceManager()
     let transcriptionService = TranscriptionService()
+    let transcriptionHistory = TranscriptionHistoryStore()
     let shortcutPreferences = ShortcutPreferences()
     lazy var hotkeyManager = HotkeyManager(preferences: shortcutPreferences)
     let permissions = PermissionManager.shared
@@ -178,6 +179,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 // the user just sees "Transcribing" a bit longer on first use
                 let text = try await transcriptionService.transcribe(audioSamples: samples)
                 if !text.isEmpty {
+                    transcriptionHistory.append(text)
                     TextInserter.insertText(text)
                     updateIndicator(state: .done(text: text))
                     let dismissalDelay = indicatorModel.notice == nil ? 1.5 : 4
@@ -618,6 +620,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                     .environmentObject(updateService)
                     .environment(shortcutPreferences)
                     .environment(audioInputDevices)
+                    .environment(transcriptionHistory)
             )
             window.isReleasedWhenClosed = false
             window.delegate = self
