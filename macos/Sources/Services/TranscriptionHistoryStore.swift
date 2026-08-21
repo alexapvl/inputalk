@@ -48,7 +48,7 @@ final class TranscriptionHistoryStore {
     func append(_ text: String) {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty,
-            !TranscriptionPostProcessor.isBlankAudio(trimmed)
+            !TranscriptionPostProcessor.isNonSpeechOnly(trimmed)
         else { return }
 
         let entry = TranscriptionHistoryEntry(

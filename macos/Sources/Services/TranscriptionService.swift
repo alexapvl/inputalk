@@ -149,10 +149,12 @@ class TranscriptionService: ObservableObject {
 }
 
 enum TranscriptionPostProcessor {
-    static func isBlankAudio(_ text: String) -> Bool {
+    /// True when Whisper produced only status markers such as `[BLANK_AUDIO]`
+    /// or `[INAUDIBLE]`, with no actual speech.
+    static func isNonSpeechOnly(_ text: String) -> Bool {
         text.range(
-            of: #"^\s*[\[(]blank[\s_-]*audio[\])]\s*$"#,
-            options: [.regularExpression, .caseInsensitive]
+            of: #"^\s*(?:[\[(][^\[\]()]+[\])]\s*)+$"#,
+            options: .regularExpression
         ) != nil
     }
 
@@ -160,7 +162,7 @@ enum TranscriptionPostProcessor {
         var result = text.trimmingCharacters(in: .whitespacesAndNewlines)
 
         let trailingNonSpeechPattern =
-            #"(?:\s*(?:\[(?:blank[\s_-]*audio|silence)\]|\((?:blank[\s_-]*audio|silence)\)))+\s*$"#
+            #"(?:\s*(?:\[[A-Za-z][A-Za-z_\s-]*\]|\((?:blank[\s_-]*audio|silence)\)))+\s*$"#
         let withoutTrailingNonSpeech = result.replacingOccurrences(
             of: trailingNonSpeechPattern,
             with: "",

@@ -22,19 +22,39 @@ final class TranscriptionPostProcessorTests: XCTestCase {
         )
     }
 
-    func testRecognizesBlankAudioOutput() {
-        XCTAssertTrue(TranscriptionPostProcessor.isBlankAudio("[BLANK_AUDIO]"))
-        XCTAssertTrue(TranscriptionPostProcessor.isBlankAudio(" (blank audio) "))
-        XCTAssertFalse(TranscriptionPostProcessor.isBlankAudio("blank audio"))
+    func testRemovesTrailingInaudibleAfterSpeech() {
+        XCTAssertEqual(
+            TranscriptionPostProcessor.process(
+                "Hello from Inputalk. [INAUDIBLE]",
+                removeFillerWords: false
+            ),
+            "Hello from Inputalk."
+        )
     }
 
-    func testKeepsBlankAudioWhenItIsOnlyOutput() {
+    func testRecognizesNonSpeechOnlyOutput() {
+        XCTAssertTrue(TranscriptionPostProcessor.isNonSpeechOnly("[BLANK_AUDIO]"))
+        XCTAssertTrue(TranscriptionPostProcessor.isNonSpeechOnly(" (blank audio) "))
+        XCTAssertTrue(TranscriptionPostProcessor.isNonSpeechOnly("[INAUDIBLE]"))
+        XCTAssertTrue(TranscriptionPostProcessor.isNonSpeechOnly("[INAUDIBLE] [BLANK_AUDIO]"))
+        XCTAssertFalse(TranscriptionPostProcessor.isNonSpeechOnly("blank audio"))
+        XCTAssertFalse(TranscriptionPostProcessor.isNonSpeechOnly("hello [INAUDIBLE]"))
+    }
+
+    func testKeepsNonSpeechMarkerWhenItIsOnlyOutput() {
         XCTAssertEqual(
             TranscriptionPostProcessor.process(
                 "[BLANK_AUDIO]",
                 removeFillerWords: true
             ),
             "[BLANK_AUDIO]"
+        )
+        XCTAssertEqual(
+            TranscriptionPostProcessor.process(
+                "[INAUDIBLE]",
+                removeFillerWords: true
+            ),
+            "[INAUDIBLE]"
         )
     }
 }

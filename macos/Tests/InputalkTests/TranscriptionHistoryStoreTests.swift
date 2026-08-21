@@ -4,7 +4,7 @@ import XCTest
 
 @MainActor
 final class TranscriptionHistoryStoreTests: XCTestCase {
-    func testAppendIgnoresEmptyWhitespaceOrBlankAudioText() throws {
+    func testAppendIgnoresEmptyWhitespaceOrNonSpeechOnlyText() throws {
         let fileURL = temporaryHistoryURL()
         defer { try? FileManager.default.removeItem(at: fileURL) }
 
@@ -12,7 +12,12 @@ final class TranscriptionHistoryStoreTests: XCTestCase {
         store.append("")
         store.append("   \n\t")
         store.append("[BLANK_AUDIO]")
+        store.append("[INAUDIBLE]")
+        store.append("(silence)")
         XCTAssertTrue(store.entries.isEmpty)
+
+        store.append("hello [INAUDIBLE]")
+        XCTAssertEqual(store.entries.map(\.text), ["hello [INAUDIBLE]"])
     }
 
     func testAppendStoresNewestFirstAndPersists() throws {

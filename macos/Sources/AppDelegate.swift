@@ -182,7 +182,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 // transcribe() waits for the model if it's still loading —
                 // the user just sees "Transcribing" a bit longer on first use
                 let text = try await transcriptionService.transcribe(audioSamples: samples)
-                if TranscriptionPostProcessor.isBlankAudio(text) {
+                if TranscriptionPostProcessor.isNonSpeechOnly(text) {
                     updateIndicator(state: .warning(text: text))
                     indicatorDismissTask = Task {
                         try? await Task.sleep(for: .seconds(1.5))
