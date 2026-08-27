@@ -149,13 +149,21 @@ class TranscriptionService: ObservableObject {
 }
 
 enum TranscriptionPostProcessor {
-    /// True when Whisper produced only status markers such as `[BLANK_AUDIO]`
-    /// or `[INAUDIBLE]`, with no actual speech.
+    static let blankAudioMarker = "[BLANK_AUDIO]"
+
+    /// True when Whisper produced only status markers or sound-event tags
+    /// such as `[BLANK_AUDIO]`, `[INAUDIBLE]`, `(claps)`, or `(cars honking)`.
     static func isNonSpeechOnly(_ text: String) -> Bool {
-        text.range(
-            of: #"^\s*(?:[\[(][^\[\]()]+[\])]\s*)+$"#,
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return false }
+        let withoutTokens = trimmed.replacingOccurrences(
+            of: #"[\(\[][^\[\]()]+[\)\]]"#,
+            with: " ",
             options: .regularExpression
-        ) != nil
+        )
+        return withoutTokens
+            .trimmingCharacters(in: .whitespacesAndNewlines.union(.punctuationCharacters))
+            .isEmpty
     }
 
     static func process(_ text: String, removeFillerWords: Bool) -> String {
@@ -173,26 +181,28 @@ enum TranscriptionPostProcessor {
             result = withoutTrailingNonSpeech
         }
 
-        guard removeFillerWords else { return result }
+        if removeFillerWords {
+            let fillerPatterns = [
+                "\\b[Uu]m\\b,?\\s?",
+                "\\b[Uu]h\\b,?\\s?",
+            ]
 
-        let fillerPatterns = [
-            "\\b[Uu]m\\b,?\\s?",
-            "\\b[Uu]h\\b,?\\s?",
-        ]
+            for pattern in fillerPatterns {
+                result = result.replacingOccurrences(
+                    of: pattern,
+                    with: "",
+                    options: .regularExpression
+                )
+            }
 
-        for pattern in fillerPatterns {
-            result = result.replacingOccurrences(
-                of: pattern,
-                with: "",
-                options: .regularExpression
-            )
+            while result.contains("  ") {
+                result = result.replacingOccurrences(of: "  ", with: " ")
+            }
+
+            result = result.trimmingCharacters(in: .whitespacesAndNewlines)
         }
 
-        while result.contains("  ") {
-            result = result.replacingOccurrences(of: "  ", with: " ")
-        }
-
-        return result.trimmingCharacters(in: .whitespacesAndNewlines)
+        return result.isEmpty ? blankAudioMarker : result
     }
 }
 

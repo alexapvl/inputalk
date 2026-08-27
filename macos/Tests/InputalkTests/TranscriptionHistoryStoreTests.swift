@@ -14,6 +14,9 @@ final class TranscriptionHistoryStoreTests: XCTestCase {
         store.append("[BLANK_AUDIO]")
         store.append("[INAUDIBLE]")
         store.append("(silence)")
+        store.append("(claps)")
+        store.append("(cars honking)")
+        store.append("(claps), (laughter)")
         XCTAssertTrue(store.entries.isEmpty)
 
         store.append("hello [INAUDIBLE]")

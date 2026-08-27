@@ -170,7 +170,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             if let notice = indicatorModel.notice {
                 showTransientWarning(notice)
             } else {
-                dismissIndicator()
+                showNonSpeechWarning()
             }
             return
         }
@@ -183,12 +183,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 // the user just sees "Transcribing" a bit longer on first use
                 let text = try await transcriptionService.transcribe(audioSamples: samples)
                 if TranscriptionPostProcessor.isNonSpeechOnly(text) {
-                    updateIndicator(state: .warning(text: text))
-                    indicatorDismissTask = Task {
-                        try? await Task.sleep(for: .seconds(1.5))
-                        dismissIndicator()
-                    }
-                } else if !text.isEmpty {
+                    showNonSpeechWarning(text)
+                } else {
                     transcriptionHistory.append(text)
                     TextInserter.insertText(text)
                     updateIndicator(state: .done(text: text))
@@ -197,8 +193,6 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                         try? await Task.sleep(for: .seconds(dismissalDelay))
                         dismissIndicator()
                     }
-                } else {
-                    dismissIndicator()
                 }
             } catch {
                 print("Transcription failed: \(error)")
@@ -225,6 +219,16 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 "\(disconnectedName) disconnected. Recording stopped. No fallback microphone is available."
         }
         stopRecordingAndTranscribe()
+    }
+
+    private func showNonSpeechWarning(
+        _ text: String = TranscriptionPostProcessor.blankAudioMarker
+    ) {
+        updateIndicator(state: .warning(text: text))
+        indicatorDismissTask = Task {
+            try? await Task.sleep(for: .seconds(1.5))
+            dismissIndicator()
+        }
     }
 
     private func showTransientWarning(_ message: String) {
