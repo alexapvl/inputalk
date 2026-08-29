@@ -13,6 +13,7 @@ struct SettingsView: View {
     @AppStorage("removeFillerWords") private var removeFillerWords = true
     @AppStorage(Defaults.showInDock) private var showInDock = true
     @AppStorage(Defaults.pasteHistoryFromMenuBar) private var pasteHistoryFromMenuBar = true
+    @AppStorage(Defaults.settingsPage) private var settingsPage = SettingsPage.dictation.rawValue
 
     @State private var launchAtLogin = SMAppService.mainApp.status == .enabled
     @State private var shortcutEditor: ShortcutEditorModel?
@@ -21,301 +22,38 @@ struct SettingsView: View {
     @State private var copiedResetTask: Task<Void, Never>?
 
     var body: some View {
-        Form {
-            // Shortcut
-            Section {
-                Button {
-                    shortcutEditor = ShortcutEditorModel(
-                        configuration: shortcutPreferences.configuration)
-                } label: {
-                    HStack(spacing: 12) {
-                        Label("Shortcut", systemImage: "keyboard")
-                        Spacer()
-                        VStack(alignment: .trailing, spacing: 2) {
-                            Text(shortcutPreferences.configuration.chordSummary)
-                                .foregroundStyle(.primary)
-                                .lineLimit(1)
-                                .truncationMode(.middle)
-                            Text(shortcutPreferences.configuration.behaviorSummary)
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                                .lineLimit(1)
-                        }
-                        Image(systemName: "chevron.right")
-                            .font(.caption)
-                            .foregroundStyle(.tertiary)
-                    }
-                }
-                .buttonStyle(.plain)
-                .focusEffectDisabled()
-
-                Picker(selection: audioInputSelection) {
-                    Text(audioInputDevices.selectedDefaultLabel)
-                        .tag(AudioInputSelection.systemDefault)
-
-                    Divider()
-
-                    if case .device(let uid) = audioInputDevices.selection,
-                        audioInputDevices.selectedDevice == nil
-                    {
-                        Text("\(audioInputDevices.selectedDeviceName) (Unavailable)")
-                            .tag(AudioInputSelection.device(uid: uid))
-                    }
-
-                    ForEach(audioInputDevices.devices) { device in
-                        Text(device.name)
-                            .tag(AudioInputSelection.device(uid: device.uid))
-                    }
-                } label: {
-                    Label("Microphone", systemImage: "mic")
-                }
-
-                if let message = audioInputDevices.unavailableSelectionMessage {
-                    Label(message, systemImage: "exclamationmark.triangle.fill")
-                        .font(.caption)
-                        .foregroundStyle(.orange)
-                } else if let error = audioInputDevices.refreshError {
-                    Label(error, systemImage: "exclamationmark.triangle.fill")
-                        .font(.caption)
-                        .foregroundStyle(.orange)
-                }
-            } header: {
-                Text("Input")
+        VStack(spacing: 0) {
+            Picker("Page", selection: $settingsPage) {
+                Text("Dictation").tag(SettingsPage.dictation.rawValue)
+                Text("History").tag(SettingsPage.history.rawValue)
+                Text("General").tag(SettingsPage.general.rawValue)
             }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .padding(.horizontal, 20)
+            .padding(.top, 16)
+            .padding(.bottom, 8)
 
-            // Model
-            Section {
-                Picker(selection: $transcription.selectedModel) {
-                    Text("Tiny (~75 MB)").tag("tiny")
-                    Text("Base (~142 MB)").tag("base")
-                    Text("Small (~466 MB)").tag("small")
-                    Text("Medium (~1.5 GB)").tag("medium")
-                } label: {
-                    Label("Model", systemImage: "cpu")
+            Form {
+                switch SettingsPage(rawValue: settingsPage) ?? .dictation {
+                case .dictation:
+                    dictationSections
+                case .history:
+                    historySections
+                case .general:
+                    generalSections
                 }
-
-                HStack {
-                    Label("Status", systemImage: "circle.fill")
-                        .foregroundStyle(modelStatusColor)
-                    Spacer()
-                    Text(modelStatusText)
-                        .foregroundStyle(.secondary)
-                    if case .error = transcription.modelState {
-                        Button("Retry") {
-                            Task { await transcription.loadModel() }
-                        }
-                        .buttonStyle(.bordered)
-                        .controlSize(.small)
-                    }
-                }
-                .onChange(of: transcription.selectedModel) {
-                    Task { await transcription.loadModel() }
-                }
-            } header: {
-                Text("Transcription")
             }
-
-            // Post-processing
-            Section {
-                Toggle(isOn: $removeFillerWords) {
-                    Label("Remove filler words", systemImage: "text.badge.minus")
-                }
-            } header: {
-                Text("Post-processing")
-            }
-
-            // History
-            Section {
-                Toggle(isOn: $pasteHistoryFromMenuBar) {
-                    Label("Paste from menu bar", systemImage: "doc.on.clipboard")
-                }
-
-                if transcriptionHistory.entries.isEmpty {
-                    Text("Transcripts you dictate will show up here so you can copy them later.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                } else {
-                    ScrollView {
-                        LazyVStack(spacing: 8) {
-                            ForEach(transcriptionHistory.entries) { entry in
-                                HStack(alignment: .top, spacing: 12) {
-                                    VStack(alignment: .leading, spacing: 4) {
-                                        Text(entry.text)
-                                            .font(.body)
-                                            .lineLimit(3)
-                                            .textSelection(.enabled)
-                                        Text(
-                                            entry.createdAt,
-                                            format: .relative(presentation: .named)
-                                        )
-                                        .font(.caption)
-                                        .foregroundStyle(.secondary)
-                                    }
-                                    Spacer(minLength: 8)
-                                    Button(copiedEntryID == entry.id ? "Copied" : "Copy") {
-                                        copyHistoryEntry(entry)
-                                    }
-                                    .buttonStyle(.bordered)
-                                    .controlSize(.small)
-                                    .disabled(copiedEntryID == entry.id)
-                                }
-                                .padding(.vertical, 2)
-                            }
-                            .onDelete(perform: deleteHistoryEntries)
-                        }
-                    }
-                    .frame(maxHeight: 240)
-
-                    Button("Clear History", role: .destructive) {
-                        transcriptionHistory.clear()
-                        copiedEntryID = nil
-                    }
-                }
-            } header: {
-                Text("History")
-            } footer: {
-                Text(
-                    pasteHistoryFromMenuBar
-                        ? "Menu bar History copies and pastes into the frontmost app. Settings Copy only puts text on the clipboard. Keeps the last \(TranscriptionHistoryStore.maxEntries) transcripts."
-                        : "Menu bar History and Settings Copy only put text on the clipboard. Keeps the last \(TranscriptionHistoryStore.maxEntries) transcripts."
-                )
-            }
-
-            // General
-            Section {
-                Toggle(isOn: $launchAtLogin) {
-                    Label("Launch at Login", systemImage: "arrow.right.circle")
-                }
-                .onChange(of: launchAtLogin) { _, newValue in
-                    do {
-                        if newValue {
-                            try SMAppService.mainApp.register()
-                        } else {
-                            try SMAppService.mainApp.unregister()
-                        }
-                    } catch {
-                        launchAtLogin = !newValue
-                    }
-                }
-
-                Toggle(isOn: $showInDock) {
-                    Label("Show in Dock", systemImage: "dock.rectangle")
-                }
-                .onChange(of: showInDock) { _, _ in
-                    (NSApp.delegate as? AppDelegate)?.applyDockVisibilityPreference()
-                }
-            } header: {
-                Text("General")
-            }
-
-            // Updates
-            Section {
-                Button {
-                    updates.checkForUpdates()
-                } label: {
-                    Label("Check for Updates...", systemImage: "arrow.down.circle")
-                }
-                .disabled(!updates.isConfigured)
-
-                Toggle(isOn: Binding(
-                    get: { updates.automaticallyChecksForUpdates },
-                    set: { updates.automaticallyChecksForUpdates = $0 }
-                )) {
-                    Label("Automatically check for updates", systemImage: "arrow.triangle.2.circlepath")
-                }
-                .disabled(!updates.isConfigured)
-
-                if !updates.isConfigured {
-                    Text("Sparkle updates are not configured for this build.")
-                        .font(.caption)
-                        .foregroundStyle(.tertiary)
-                }
-            } header: {
-                Text("Updates")
-            }
-
-            // Permissions
-            Section {
-                HStack {
-                    Label("Microphone", systemImage: "mic")
-                    Spacer()
-                    if permissions.hasMicrophone {
-                        Image(systemName: "checkmark.circle.fill")
-                            .foregroundStyle(.green)
-                    } else {
-                        Button("Grant") {
-                            requestMicrophonePermission()
-                        }
-                        .buttonStyle(.bordered)
-                        .controlSize(.small)
-                    }
-                }
-
-                HStack {
-                    Label("Accessibility", systemImage: "hand.raised")
-                    Spacer()
-                    if permissions.hasAccessibility {
-                        Image(systemName: "checkmark.circle.fill")
-                            .foregroundStyle(.green)
-                    } else {
-                        Button("Grant") {
-                            permissions.requestAccessibility()
-                        }
-                        .buttonStyle(.bordered)
-                        .controlSize(.small)
-                    }
-                }
-            } header: {
-                Text("Permissions")
-            }
-
-            // Storage
-            Section {
-                HStack {
-                    Label("Model data", systemImage: "internaldrive")
-                    Spacer()
-                    Text(transcription.modelsDiskUsage)
-                        .foregroundStyle(.secondary)
-                }
-                HStack {
-                    Text(TranscriptionService.modelsDirectory.path)
-                        .font(.caption2)
-                        .foregroundStyle(.tertiary)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                    Spacer()
-                    Button("Show in Finder") {
-                        NSWorkspace.shared.selectFile(
-                            nil,
-                            inFileViewerRootedAtPath: TranscriptionService.modelsDirectory.path
-                        )
-                    }
-                    .buttonStyle(.bordered)
-                    .controlSize(.small)
-                }
-            } header: {
-                Text("Storage")
-            }
-
-            // About
-            Section {
-                HStack {
-                    Text("Inputalk")
-                    Spacer()
-                    Text("v0.1.0")
-                        .foregroundStyle(.secondary)
-                }
-                Text("Free, local voice-to-text powered by WhisperKit.")
-                    .font(.caption)
-                    .foregroundStyle(.tertiary)
-            } header: {
-                Text("About")
-            }
+            .formStyle(.grouped)
         }
-        .formStyle(.grouped)
         .frame(width: 400, height: 520)
         .onAppear {
             audioInputDevices.refresh()
+        }
+        .onChange(of: settingsPage) { _, page in
+            if page == SettingsPage.dictation.rawValue {
+                audioInputDevices.refresh()
+            }
         }
         .sheet(item: $shortcutEditor) { editor in
             ShortcutConfigurationView(editor: editor) { configuration in
@@ -334,6 +72,302 @@ struct SettingsView: View {
             Text(
                 "Inputalk could not access the microphone. Allow microphone access in System Settings, then return to Inputalk."
             )
+        }
+    }
+
+    // MARK: - Dictation
+
+    @ViewBuilder
+    private var dictationSections: some View {
+        Section {
+            Button {
+                shortcutEditor = ShortcutEditorModel(
+                    configuration: shortcutPreferences.configuration)
+            } label: {
+                HStack(spacing: 12) {
+                    Label("Shortcut", systemImage: "keyboard")
+                    Spacer()
+                    VStack(alignment: .trailing, spacing: 2) {
+                        Text(shortcutPreferences.configuration.chordSummary)
+                            .foregroundStyle(.primary)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                        Text(shortcutPreferences.configuration.behaviorSummary)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                    }
+                    Image(systemName: "chevron.right")
+                        .font(.caption)
+                        .foregroundStyle(.tertiary)
+                }
+            }
+            .buttonStyle(.plain)
+            .focusEffectDisabled()
+
+            Picker(selection: audioInputSelection) {
+                Text(audioInputDevices.selectedDefaultLabel)
+                    .tag(AudioInputSelection.systemDefault)
+
+                Divider()
+
+                if case .device(let uid) = audioInputDevices.selection,
+                    audioInputDevices.selectedDevice == nil
+                {
+                    Text("\(audioInputDevices.selectedDeviceName) (Unavailable)")
+                        .tag(AudioInputSelection.device(uid: uid))
+                }
+
+                ForEach(audioInputDevices.devices) { device in
+                    Text(device.name)
+                        .tag(AudioInputSelection.device(uid: device.uid))
+                }
+            } label: {
+                Label("Microphone", systemImage: "mic")
+            }
+
+            if let message = audioInputDevices.unavailableSelectionMessage {
+                Label(message, systemImage: "exclamationmark.triangle.fill")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+            } else if let error = audioInputDevices.refreshError {
+                Label(error, systemImage: "exclamationmark.triangle.fill")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+            }
+        } header: {
+            Text("Input")
+        }
+
+        Section {
+            Picker(selection: $transcription.selectedModel) {
+                Text("Tiny (~75 MB)").tag("tiny")
+                Text("Base (~142 MB)").tag("base")
+                Text("Small (~466 MB)").tag("small")
+                Text("Medium (~1.5 GB)").tag("medium")
+            } label: {
+                Label("Model", systemImage: "cpu")
+            }
+
+            HStack {
+                Label("Status", systemImage: "circle.fill")
+                    .foregroundStyle(modelStatusColor)
+                Spacer()
+                Text(modelStatusText)
+                    .foregroundStyle(.secondary)
+                if case .error = transcription.modelState {
+                    Button("Retry") {
+                        Task { await transcription.loadModel() }
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                }
+            }
+            .onChange(of: transcription.selectedModel) {
+                Task { await transcription.loadModel() }
+            }
+        } header: {
+            Text("Transcription")
+        }
+
+        Section {
+            Toggle(isOn: $removeFillerWords) {
+                Label("Remove filler words", systemImage: "text.badge.minus")
+            }
+        } header: {
+            Text("Post-processing")
+        }
+
+        Section {
+            HStack {
+                Label("Microphone", systemImage: "mic")
+                Spacer()
+                if permissions.hasMicrophone {
+                    Image(systemName: "checkmark.circle.fill")
+                        .foregroundStyle(.green)
+                } else {
+                    Button("Grant") {
+                        requestMicrophonePermission()
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                }
+            }
+
+            HStack {
+                Label("Accessibility", systemImage: "hand.raised")
+                Spacer()
+                if permissions.hasAccessibility {
+                    Image(systemName: "checkmark.circle.fill")
+                        .foregroundStyle(.green)
+                } else {
+                    Button("Grant") {
+                        permissions.requestAccessibility()
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                }
+            }
+        } header: {
+            Text("Permissions")
+        }
+    }
+
+    // MARK: - History
+
+    @ViewBuilder
+    private var historySections: some View {
+        Section {
+            Toggle(isOn: $pasteHistoryFromMenuBar) {
+                Label("Paste from menu bar", systemImage: "doc.on.clipboard")
+            }
+
+            if transcriptionHistory.entries.isEmpty {
+                Text("Transcripts you dictate will show up here so you can copy them later.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            } else {
+                ScrollView {
+                    LazyVStack(spacing: 8) {
+                        ForEach(transcriptionHistory.entries) { entry in
+                            HStack(alignment: .top, spacing: 12) {
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Text(entry.text)
+                                        .font(.body)
+                                        .lineLimit(3)
+                                        .textSelection(.enabled)
+                                    Text(
+                                        entry.createdAt,
+                                        format: .relative(presentation: .named)
+                                    )
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                }
+                                Spacer(minLength: 8)
+                                Button(copiedEntryID == entry.id ? "Copied" : "Copy") {
+                                    copyHistoryEntry(entry)
+                                }
+                                .buttonStyle(.bordered)
+                                .controlSize(.small)
+                                .disabled(copiedEntryID == entry.id)
+                            }
+                            .padding(.vertical, 2)
+                        }
+                        .onDelete(perform: deleteHistoryEntries)
+                    }
+                }
+                .frame(maxHeight: 320)
+
+                Button("Clear History", role: .destructive) {
+                    transcriptionHistory.clear()
+                    copiedEntryID = nil
+                }
+            }
+        } header: {
+            Text("History")
+        } footer: {
+            Text(
+                pasteHistoryFromMenuBar
+                    ? "Menu bar History copies and pastes into the frontmost app. Settings Copy only puts text on the clipboard. Keeps the last \(TranscriptionHistoryStore.maxEntries) transcripts."
+                    : "Menu bar History and Settings Copy only put text on the clipboard. Keeps the last \(TranscriptionHistoryStore.maxEntries) transcripts."
+            )
+        }
+    }
+
+    // MARK: - General
+
+    @ViewBuilder
+    private var generalSections: some View {
+        Section {
+            Toggle(isOn: $launchAtLogin) {
+                Label("Launch at Login", systemImage: "arrow.right.circle")
+            }
+            .onChange(of: launchAtLogin) { _, newValue in
+                do {
+                    if newValue {
+                        try SMAppService.mainApp.register()
+                    } else {
+                        try SMAppService.mainApp.unregister()
+                    }
+                } catch {
+                    launchAtLogin = !newValue
+                }
+            }
+
+            Toggle(isOn: $showInDock) {
+                Label("Show in Dock", systemImage: "dock.rectangle")
+            }
+            .onChange(of: showInDock) { _, _ in
+                (NSApp.delegate as? AppDelegate)?.applyDockVisibilityPreference()
+            }
+        } header: {
+            Text("General")
+        }
+
+        Section {
+            Button {
+                updates.checkForUpdates()
+            } label: {
+                Label("Check for Updates...", systemImage: "arrow.down.circle")
+            }
+            .disabled(!updates.isConfigured)
+
+            Toggle(isOn: Binding(
+                get: { updates.automaticallyChecksForUpdates },
+                set: { updates.automaticallyChecksForUpdates = $0 }
+            )) {
+                Label("Automatically check for updates", systemImage: "arrow.triangle.2.circlepath")
+            }
+            .disabled(!updates.isConfigured)
+
+            if !updates.isConfigured {
+                Text("Sparkle updates are not configured for this build.")
+                    .font(.caption)
+                    .foregroundStyle(.tertiary)
+            }
+        } header: {
+            Text("Updates")
+        }
+
+        Section {
+            HStack {
+                Label("Model data", systemImage: "internaldrive")
+                Spacer()
+                Text(transcription.modelsDiskUsage)
+                    .foregroundStyle(.secondary)
+            }
+            HStack {
+                Text(TranscriptionService.modelsDirectory.path)
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                Spacer()
+                Button("Show in Finder") {
+                    NSWorkspace.shared.selectFile(
+                        nil,
+                        inFileViewerRootedAtPath: TranscriptionService.modelsDirectory.path
+                    )
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+            }
+        } header: {
+            Text("Storage")
+        }
+
+        Section {
+            HStack {
+                Text("Inputalk")
+                Spacer()
+                Text("v0.1.0")
+                    .foregroundStyle(.secondary)
+            }
+            Text("Free, local voice-to-text powered by WhisperKit.")
+                .font(.caption)
+                .foregroundStyle(.tertiary)
+        } header: {
+            Text("About")
         }
     }
 

@@ -6,6 +6,13 @@ import SwiftUI
 enum Defaults {
     static let showInDock = "showInDock"
     static let pasteHistoryFromMenuBar = "pasteHistoryFromMenuBar"
+    static let settingsPage = "settingsPage"
+}
+
+enum SettingsPage: String {
+    case dictation
+    case history
+    case general
 }
 
 // MARK: - App State
