@@ -1,79 +1,123 @@
 import AppKit
 import Foundation
+import SQLite3
 
-struct TranscriptionHistoryEntry: Identifiable, Codable, Equatable, Sendable {
-    let id: UUID
+struct TranscriptionHistoryEntry: Identifiable, Equatable, Sendable {
+    let id: Int64
     let createdAt: Date
     let text: String
+    let durationSeconds: TimeInterval?
+    let wordCount: Int
+}
+
+struct TranscriptionStats: Equatable, Sendable {
+    var wordCount: Int
+    var durationSeconds: Double
+
+    var wordsPerMinute: Double? {
+        guard durationSeconds > 0 else { return nil }
+        return Double(wordCount) / (durationSeconds / 60)
+    }
 }
 
 @MainActor
 @Observable
 final class TranscriptionHistoryStore {
-    static let maxEntries = 100
-
     private(set) var entries: [TranscriptionHistoryEntry] = []
+    private(set) var stats: TranscriptionStats?
 
-    private let fileURL: URL
-    private let encoder: JSONEncoder
-    private let decoder: JSONDecoder
+    private let handle = SQLiteHandle()
+    private var database: OpaquePointer? { handle.db }
+    private let databaseURL: URL
+    private let jsonURL: URL
+    private var statsNeedRefresh = true
 
-    static var defaultFileURL: URL {
+    private let isoFormatter: ISO8601DateFormatter = {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime]
+        return formatter
+    }()
+
+    static var defaultDirectory: URL {
         let appSupport = FileManager.default.urls(
             for: .applicationSupportDirectory,
             in: .userDomainMask
         ).first!
         let bundleID = Bundle.main.bundleIdentifier ?? "com.inputalk.app"
-        return appSupport
-            .appendingPathComponent(bundleID, isDirectory: true)
-            .appendingPathComponent("history.json", isDirectory: false)
+        return appSupport.appendingPathComponent(bundleID, isDirectory: true)
     }
 
-    init(fileURL: URL = TranscriptionHistoryStore.defaultFileURL) {
-        self.fileURL = fileURL
-
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-        encoder.dateEncodingStrategy = .iso8601
-        self.encoder = encoder
-
-        let decoder = JSONDecoder()
-        decoder.dateDecodingStrategy = .iso8601
-        self.decoder = decoder
-
-        load()
+    static var defaultDatabaseURL: URL {
+        defaultDirectory.appendingPathComponent("history.sqlite", isDirectory: false)
     }
 
-    /// Saves every meaningful transcript, newest first, capped at `maxEntries`.
-    func append(_ text: String) {
+    static var defaultJSONURL: URL {
+        defaultDirectory.appendingPathComponent("history.json", isDirectory: false)
+    }
+
+    init(
+        databaseURL: URL = TranscriptionHistoryStore.defaultDatabaseURL,
+        jsonURL: URL = TranscriptionHistoryStore.defaultJSONURL
+    ) {
+        self.databaseURL = databaseURL
+        self.jsonURL = jsonURL
+        openDatabase()
+        migrateJSONIfNeeded()
+        entries = loadEntries()
+    }
+
+    /// Saves every meaningful transcript, newest first.
+    func append(_ text: String, duration: TimeInterval) {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty,
             !TranscriptionPostProcessor.isNonSpeechOnly(trimmed)
         else { return }
 
+        let words = Self.wordCount(in: trimmed)
+        let storedDuration = duration > 0 ? duration : nil
+        let createdAt = Date()
+        guard
+            let id = insert(
+                createdAt: createdAt,
+                text: trimmed,
+                durationSeconds: storedDuration,
+                wordCount: words
+            )
+        else { return }
+
         let entry = TranscriptionHistoryEntry(
-            id: UUID(),
-            createdAt: Date(),
-            text: trimmed
+            id: id,
+            createdAt: createdAt,
+            text: trimmed,
+            durationSeconds: storedDuration,
+            wordCount: words
         )
         entries.insert(entry, at: 0)
-        if entries.count > Self.maxEntries {
-            entries = Array(entries.prefix(Self.maxEntries))
-        }
-        save()
+        statsNeedRefresh = true
     }
 
-    func remove(id: UUID) {
+    func remove(id: Int64) {
         let before = entries.count
         entries.removeAll { $0.id == id }
         guard entries.count != before else { return }
-        save()
+        execute("DELETE FROM transcripts WHERE id = \(id)")
+        statsNeedRefresh = true
+        refreshStatsIfNeeded()
     }
 
     func clear() {
         guard !entries.isEmpty else { return }
         entries = []
-        save()
+        execute("DELETE FROM transcripts")
+        statsNeedRefresh = true
+        stats = nil
+        refreshStatsIfNeeded()
+    }
+
+    func refreshStatsIfNeeded() {
+        guard statsNeedRefresh else { return }
+        stats = fetchStats()
+        statsNeedRefresh = false
     }
 
     func copyToPasteboard(_ entry: TranscriptionHistoryEntry) {
@@ -91,27 +135,240 @@ final class TranscriptionHistoryStore {
         return String(singleLine.prefix(maxCharacters - 3)) + "..."
     }
 
-    private func load() {
-        guard FileManager.default.fileExists(atPath: fileURL.path) else {
-            entries = []
-            return
-        }
-        guard let data = try? Data(contentsOf: fileURL),
-            let decoded = try? decoder.decode([TranscriptionHistoryEntry].self, from: data)
-        else {
-            entries = []
-            return
-        }
-        entries = Array(decoded.prefix(Self.maxEntries))
+    static func wordCount(in text: String) -> Int {
+        text.split { $0.isWhitespace || $0.isNewline }.count
     }
 
-    private func save() {
-        let directory = fileURL.deletingLastPathComponent()
+    static func formatDuration(_ seconds: TimeInterval) -> String {
+        let total = max(0, Int(seconds.rounded()))
+        let hours = total / 3600
+        let minutes = (total % 3600) / 60
+        let secs = total % 60
+        if hours > 0 {
+            return minutes > 0 ? "\(hours)h \(minutes)m" : "\(hours)h"
+        }
+        if minutes > 0 {
+            return secs > 0 ? "\(minutes)m \(secs)s" : "\(minutes)m"
+        }
+        return "\(secs)s"
+    }
+
+    // MARK: - SQLite
+
+    private func openDatabase() {
+        let directory = databaseURL.deletingLastPathComponent()
         try? FileManager.default.createDirectory(
             at: directory,
             withIntermediateDirectories: true
         )
-        guard let data = try? encoder.encode(entries) else { return }
-        try? data.write(to: fileURL, options: [.atomic])
+
+        var db: OpaquePointer?
+        let flags = SQLITE_OPEN_CREATE | SQLITE_OPEN_READWRITE | SQLITE_OPEN_FULLMUTEX
+        guard sqlite3_open_v2(databaseURL.path, &db, flags, nil) == SQLITE_OK, let db else {
+            sqlite3_close(db)
+            return
+        }
+        handle.db = db
+        execute("PRAGMA journal_mode = WAL")
+        execute("PRAGMA foreign_keys = ON")
+
+        if userVersion() < 1 {
+            execute(
+                """
+                CREATE TABLE IF NOT EXISTS transcripts (
+                  id INTEGER PRIMARY KEY AUTOINCREMENT,
+                  created_at TEXT NOT NULL,
+                  transcript_text TEXT NOT NULL,
+                  duration_seconds REAL,
+                  word_count INTEGER NOT NULL
+                )
+                """
+            )
+            execute(
+                "CREATE INDEX IF NOT EXISTS idx_transcripts_created_at ON transcripts(created_at DESC)"
+            )
+            setUserVersion(1)
+        }
     }
+
+    private func migrateJSONIfNeeded() {
+        guard FileManager.default.fileExists(atPath: jsonURL.path) else { return }
+
+        if rowCount() == 0 {
+            let decoder = JSONDecoder()
+            decoder.dateDecodingStrategy = .iso8601
+            if let data = try? Data(contentsOf: jsonURL),
+                let legacy = try? decoder.decode([LegacyHistoryEntry].self, from: data)
+            {
+                execute("BEGIN")
+                for item in legacy.reversed() {
+                    let trimmed = item.text.trimmingCharacters(in: .whitespacesAndNewlines)
+                    guard !trimmed.isEmpty else { continue }
+                    _ = insert(
+                        createdAt: item.createdAt,
+                        text: trimmed,
+                        durationSeconds: nil,
+                        wordCount: Self.wordCount(in: trimmed)
+                    )
+                }
+                execute("COMMIT")
+            }
+        }
+
+        try? FileManager.default.removeItem(at: jsonURL)
+    }
+
+    private func loadEntries() -> [TranscriptionHistoryEntry] {
+        guard let database else { return [] }
+        let sql = """
+            SELECT id, created_at, transcript_text, duration_seconds, word_count
+            FROM transcripts
+            ORDER BY created_at DESC, id DESC
+            """
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(database, sql, -1, &statement, nil) == SQLITE_OK,
+            let statement
+        else { return [] }
+        defer { sqlite3_finalize(statement) }
+
+        var loaded: [TranscriptionHistoryEntry] = []
+        while sqlite3_step(statement) == SQLITE_ROW {
+            let id = sqlite3_column_int64(statement, 0)
+            guard let createdAt = date(from: columnText(statement, 1)),
+                let text = columnText(statement, 2)
+            else { continue }
+            let duration: TimeInterval? =
+                sqlite3_column_type(statement, 3) == SQLITE_NULL
+                ? nil
+                : sqlite3_column_double(statement, 3)
+            let words = Int(sqlite3_column_int64(statement, 4))
+            loaded.append(
+                TranscriptionHistoryEntry(
+                    id: id,
+                    createdAt: createdAt,
+                    text: text,
+                    durationSeconds: duration,
+                    wordCount: words
+                )
+            )
+        }
+        return loaded
+    }
+
+    private func fetchStats() -> TranscriptionStats? {
+        guard let database else { return nil }
+        let sql = """
+            SELECT SUM(word_count), SUM(duration_seconds)
+            FROM transcripts
+            WHERE duration_seconds IS NOT NULL
+            """
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(database, sql, -1, &statement, nil) == SQLITE_OK,
+            let statement
+        else { return nil }
+        defer { sqlite3_finalize(statement) }
+        guard sqlite3_step(statement) == SQLITE_ROW else { return nil }
+        if sqlite3_column_type(statement, 1) == SQLITE_NULL {
+            return nil
+        }
+        let words = Int(sqlite3_column_int64(statement, 0))
+        let duration = sqlite3_column_double(statement, 1)
+        guard duration > 0 else { return nil }
+        return TranscriptionStats(wordCount: words, durationSeconds: duration)
+    }
+
+    private func insert(
+        createdAt: Date,
+        text: String,
+        durationSeconds: TimeInterval?,
+        wordCount: Int
+    ) -> Int64? {
+        guard let database else { return nil }
+        let sql = """
+            INSERT INTO transcripts (created_at, transcript_text, duration_seconds, word_count)
+            VALUES (?, ?, ?, ?)
+            """
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(database, sql, -1, &statement, nil) == SQLITE_OK,
+            let statement
+        else { return nil }
+        defer { sqlite3_finalize(statement) }
+
+        bindText(statement, 1, isoFormatter.string(from: createdAt))
+        bindText(statement, 2, text)
+        if let durationSeconds {
+            sqlite3_bind_double(statement, 3, durationSeconds)
+        } else {
+            sqlite3_bind_null(statement, 3)
+        }
+        sqlite3_bind_int64(statement, 4, Int64(wordCount))
+
+        guard sqlite3_step(statement) == SQLITE_DONE else { return nil }
+        return sqlite3_last_insert_rowid(database)
+    }
+
+    private func rowCount() -> Int {
+        guard let database else { return 0 }
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(database, "SELECT COUNT(*) FROM transcripts", -1, &statement, nil)
+            == SQLITE_OK,
+            let statement
+        else { return 0 }
+        defer { sqlite3_finalize(statement) }
+        guard sqlite3_step(statement) == SQLITE_ROW else { return 0 }
+        return Int(sqlite3_column_int64(statement, 0))
+    }
+
+    private func userVersion() -> Int {
+        guard let database else { return 0 }
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(database, "PRAGMA user_version", -1, &statement, nil) == SQLITE_OK,
+            let statement
+        else { return 0 }
+        defer { sqlite3_finalize(statement) }
+        guard sqlite3_step(statement) == SQLITE_ROW else { return 0 }
+        return Int(sqlite3_column_int64(statement, 0))
+    }
+
+    private func setUserVersion(_ version: Int) {
+        execute("PRAGMA user_version = \(version)")
+    }
+
+    @discardableResult
+    private func execute(_ sql: String) -> Bool {
+        guard let database else { return false }
+        return sqlite3_exec(database, sql, nil, nil, nil) == SQLITE_OK
+    }
+
+    private func bindText(_ statement: OpaquePointer, _ index: Int32, _ value: String) {
+        sqlite3_bind_text(statement, index, value, -1, sqliteTransient)
+    }
+
+    private func columnText(_ statement: OpaquePointer, _ index: Int32) -> String? {
+        guard let pointer = sqlite3_column_text(statement, index) else { return nil }
+        return String(cString: pointer)
+    }
+
+    private func date(from value: String?) -> Date? {
+        guard let value else { return nil }
+        return isoFormatter.date(from: value)
+    }
+}
+
+private let sqliteTransient = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
+
+private final class SQLiteHandle: @unchecked Sendable {
+    var db: OpaquePointer?
+
+    deinit {
+        if let db {
+            sqlite3_close(db)
+        }
+    }
+}
+
+private struct LegacyHistoryEntry: Codable {
+    let id: UUID
+    let createdAt: Date
+    let text: String
 }

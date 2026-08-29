@@ -217,6 +217,10 @@ final class AudioRecorder {
     /// Minimum number of samples for a valid recording (0.5s at 16kHz)
     static let minimumSamples = 8000
 
+    static func duration(sampleCount: Int) -> TimeInterval {
+        Double(sampleCount) / sampleRate
+    }
+
     private static func captureDevice(uid: String) -> AVCaptureDevice? {
         AVCaptureDevice.DiscoverySession(
             deviceTypes: [.microphone, .external],

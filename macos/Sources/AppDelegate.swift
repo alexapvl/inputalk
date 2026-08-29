@@ -192,7 +192,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 if TranscriptionPostProcessor.isNonSpeechOnly(text) {
                     showNonSpeechWarning(text)
                 } else {
-                    transcriptionHistory.append(text)
+                    transcriptionHistory.append(
+                        text,
+                        duration: AudioRecorder.duration(sampleCount: samples.count)
+                    )
                     TextInserter.insertText(text)
                     updateIndicator(state: .done(text: text))
                     let dismissalDelay = indicatorModel.notice == nil ? 1.5 : 4
@@ -640,14 +643,14 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 keyEquivalent: ""
             )
             item.target = self
-            item.representedObject = entry.id
+            item.representedObject = NSNumber(value: entry.id)
             item.toolTip = entry.text
             menu.addItem(item)
         }
     }
 
     @objc private func copyHistoryFromMenu(_ sender: NSMenuItem) {
-        guard let id = sender.representedObject as? UUID,
+        guard let id = (sender.representedObject as? NSNumber)?.int64Value,
             let entry = transcriptionHistory.entries.first(where: { $0.id == id })
         else { return }
 

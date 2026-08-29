@@ -18,7 +18,7 @@ struct SettingsView: View {
     @State private var launchAtLogin = SMAppService.mainApp.status == .enabled
     @State private var shortcutEditor: ShortcutEditorModel?
     @State private var showsMicrophonePermissionError = false
-    @State private var copiedEntryID: UUID?
+    @State private var copiedEntryID: Int64?
     @State private var copiedResetTask: Task<Void, Never>?
 
     var body: some View {
@@ -49,10 +49,16 @@ struct SettingsView: View {
         .frame(width: 400, height: 520)
         .onAppear {
             audioInputDevices.refresh()
+            if settingsPage == SettingsPage.history.rawValue {
+                transcriptionHistory.refreshStatsIfNeeded()
+            }
         }
         .onChange(of: settingsPage) { _, page in
             if page == SettingsPage.dictation.rawValue {
                 audioInputDevices.refresh()
+            }
+            if page == SettingsPage.history.rawValue {
+                transcriptionHistory.refreshStatsIfNeeded()
             }
         }
         .sheet(item: $shortcutEditor) { editor in
@@ -217,6 +223,25 @@ struct SettingsView: View {
 
     @ViewBuilder
     private var historySections: some View {
+        if let stats = transcriptionHistory.stats, let wpm = stats.wordsPerMinute {
+            Section {
+                HStack {
+                    Label("Talking rate", systemImage: "speedometer")
+                    Spacer()
+                    Text("\(Int(wpm.rounded())) wpm")
+                        .foregroundStyle(.secondary)
+                }
+                HStack {
+                    Label("Talk time", systemImage: "clock")
+                    Spacer()
+                    Text(TranscriptionHistoryStore.formatDuration(stats.durationSeconds))
+                        .foregroundStyle(.secondary)
+                }
+            } header: {
+                Text("Stats")
+            }
+        }
+
         Section {
             Toggle(isOn: $pasteHistoryFromMenuBar) {
                 Label("Paste from menu bar", systemImage: "doc.on.clipboard")
@@ -236,12 +261,7 @@ struct SettingsView: View {
                                         .font(.body)
                                         .lineLimit(3)
                                         .textSelection(.enabled)
-                                    Text(
-                                        entry.createdAt,
-                                        format: .relative(presentation: .named)
-                                    )
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
+                                    historyCaption(for: entry)
                                 }
                                 Spacer(minLength: 8)
                                 Button(copiedEntryID == entry.id ? "Copied" : "Copy") {
@@ -268,8 +288,8 @@ struct SettingsView: View {
         } footer: {
             Text(
                 pasteHistoryFromMenuBar
-                    ? "Menu bar History copies and pastes into the frontmost app. Settings Copy only puts text on the clipboard. Keeps the last \(TranscriptionHistoryStore.maxEntries) transcripts."
-                    : "Menu bar History and Settings Copy only put text on the clipboard. Keeps the last \(TranscriptionHistoryStore.maxEntries) transcripts."
+                    ? "Menu bar History copies and pastes into the frontmost app. Settings Copy only puts text on the clipboard."
+                    : "Menu bar History and Settings Copy only put text on the clipboard."
             )
         }
     }
@@ -379,6 +399,18 @@ struct SettingsView: View {
                 showsMicrophonePermissionError = true
             }
         }
+    }
+
+    @ViewBuilder
+    private func historyCaption(for entry: TranscriptionHistoryEntry) -> some View {
+        HStack(spacing: 0) {
+            Text(entry.createdAt, format: .relative(presentation: .named))
+            if let duration = entry.durationSeconds {
+                Text(" · \(TranscriptionHistoryStore.formatDuration(duration))")
+            }
+        }
+        .font(.caption)
+        .foregroundStyle(.secondary)
     }
 
     private func copyHistoryEntry(_ entry: TranscriptionHistoryEntry) {
