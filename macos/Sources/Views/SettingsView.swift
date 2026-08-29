@@ -20,6 +20,8 @@ struct SettingsView: View {
     @State private var showsMicrophonePermissionError = false
     @State private var copiedEntryID: Int64?
     @State private var copiedResetTask: Task<Void, Never>?
+    @State private var entryPendingDeletion: TranscriptionHistoryEntry?
+    @State private var showsClearHistoryConfirmation = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -65,6 +67,45 @@ struct SettingsView: View {
             ShortcutConfigurationView(editor: editor) { configuration in
                 shortcutPreferences.apply(configuration)
             }
+        }
+        .alert(
+            "Delete Transcript?",
+            isPresented: Binding(
+                get: { entryPendingDeletion != nil },
+                set: { if !$0 { entryPendingDeletion = nil } }
+            )
+        ) {
+            Button("Cancel", role: .cancel) {
+                entryPendingDeletion = nil
+            }
+            Button("Delete", role: .destructive) {
+                if let entry = entryPendingDeletion {
+                    transcriptionHistory.remove(id: entry.id)
+                    if copiedEntryID == entry.id {
+                        copiedEntryID = nil
+                    }
+                }
+                entryPendingDeletion = nil
+            }
+        } message: {
+            Text(
+                TranscriptionHistoryStore.menuTitle(
+                    for: entryPendingDeletion?.text ?? "",
+                    maxCharacters: 120
+                )
+            )
+        }
+        .alert(
+            "Clear History?",
+            isPresented: $showsClearHistoryConfirmation
+        ) {
+            Button("Cancel", role: .cancel) {}
+            Button("Clear History", role: .destructive) {
+                transcriptionHistory.clear()
+                copiedEntryID = nil
+            }
+        } message: {
+            Text("This removes every saved transcript from this Mac.")
         }
         .alert(
             "Microphone Access Required",
@@ -270,17 +311,20 @@ struct SettingsView: View {
                                 .buttonStyle(.bordered)
                                 .controlSize(.small)
                                 .disabled(copiedEntryID == entry.id)
+                                Button("Delete", role: .destructive) {
+                                    entryPendingDeletion = entry
+                                }
+                                .buttonStyle(.bordered)
+                                .controlSize(.small)
                             }
                             .padding(.vertical, 2)
                         }
-                        .onDelete(perform: deleteHistoryEntries)
                     }
                 }
                 .frame(maxHeight: 320)
 
                 Button("Clear History", role: .destructive) {
-                    transcriptionHistory.clear()
-                    copiedEntryID = nil
+                    showsClearHistoryConfirmation = true
                 }
             }
         } header: {
@@ -424,16 +468,6 @@ struct SettingsView: View {
             if copiedEntryID == entry.id {
                 copiedEntryID = nil
             }
-        }
-    }
-
-    private func deleteHistoryEntries(at offsets: IndexSet) {
-        let ids = offsets.map { transcriptionHistory.entries[$0].id }
-        for id in ids {
-            transcriptionHistory.remove(id: id)
-        }
-        if let copiedEntryID, ids.contains(copiedEntryID) {
-            self.copiedEntryID = nil
         }
     }
 
