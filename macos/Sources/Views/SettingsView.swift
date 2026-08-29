@@ -26,9 +26,9 @@ struct SettingsView: View {
     var body: some View {
         VStack(spacing: 0) {
             Picker("Page", selection: $settingsPage) {
+                Text("General").tag(SettingsPage.general.rawValue)
                 Text("Dictation").tag(SettingsPage.dictation.rawValue)
                 Text("History").tag(SettingsPage.history.rawValue)
-                Text("General").tag(SettingsPage.general.rawValue)
             }
             .pickerStyle(.segmented)
             .labelsHidden()
@@ -47,6 +47,7 @@ struct SettingsView: View {
                 }
             }
             .formStyle(.grouped)
+            .id(settingsPage)
         }
         .frame(width: 400, height: 520)
         .onAppear {
@@ -62,6 +63,13 @@ struct SettingsView: View {
             if page == SettingsPage.history.rawValue {
                 transcriptionHistory.refreshStatsIfNeeded()
             }
+        }
+        .onChange(of: transcriptionHistory.entries) { _, _ in
+            refreshHistoryStatsIfLooking()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSWindow.didBecomeKeyNotification)) { notification in
+            guard (notification.object as? NSWindow)?.title == "Settings" else { return }
+            refreshHistoryStatsIfLooking()
         }
         .sheet(item: $shortcutEditor) { editor in
             ShortcutConfigurationView(editor: editor) { configuration in
@@ -369,12 +377,16 @@ struct SettingsView: View {
         }
 
         Section {
-            Button {
-                updates.checkForUpdates()
-            } label: {
-                Label("Check for Updates...", systemImage: "arrow.down.circle")
+            HStack {
+                Label("Check for Updates", systemImage: "arrow.down.circle")
+                Spacer()
+                Button("Check") {
+                    updates.checkForUpdates()
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .disabled(!updates.isConfigured)
             }
-            .disabled(!updates.isConfigured)
 
             Toggle(isOn: Binding(
                 get: { updates.automaticallyChecksForUpdates },
@@ -436,6 +448,12 @@ struct SettingsView: View {
     }
 
     // MARK: - Helpers
+
+    private func refreshHistoryStatsIfLooking() {
+        guard settingsPage == SettingsPage.history.rawValue else { return }
+        guard NSApp.windows.contains(where: { $0.title == "Settings" && $0.isVisible }) else { return }
+        transcriptionHistory.refreshStatsIfNeeded()
+    }
 
     private func requestMicrophonePermission() {
         Task {
