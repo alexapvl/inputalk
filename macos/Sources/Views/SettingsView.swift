@@ -340,7 +340,7 @@ struct SettingsView: View {
         } footer: {
             Text(
                 pasteHistoryFromMenuBar
-                    ? "Menu bar History copies and pastes into the frontmost app. Settings Copy only puts text on the clipboard."
+                    ? "Menu bar History pastes into the frontmost app and leaves your clipboard unchanged. Settings Copy only puts text on the clipboard."
                     : "Menu bar History and Settings Copy only put text on the clipboard."
             )
         }
@@ -436,7 +436,7 @@ struct SettingsView: View {
             HStack {
                 Text("Inputalk")
                 Spacer()
-                Text("v0.1.0")
+                Text("v\(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "dev")")
                     .foregroundStyle(.secondary)
             }
             Text("Free, local voice-to-text powered by WhisperKit.")

@@ -169,10 +169,11 @@ enum TranscriptionPostProcessor {
     static func process(_ text: String, removeFillerWords: Bool) -> String {
         var result = text.trimmingCharacters(in: .whitespacesAndNewlines)
 
-        let trailingNonSpeechPattern =
-            #"(?:\s*(?:\[[A-Za-z][A-Za-z_\s-]*\]|\((?:blank[\s_-]*audio|silence)\)))+\s*$"#
+        // Whisper status markers at either end of the text, e.g. "[BLANK_AUDIO] Hello. [INAUDIBLE]".
+        let nonSpeechToken = #"(?:\[[A-Za-z][A-Za-z_\s-]*\]|\((?:blank[\s_-]*audio|silence)\))"#
+        let edgeNonSpeechPattern = "^(?:\\s*\(nonSpeechToken))+\\s*|(?:\\s*\(nonSpeechToken))+\\s*$"
         let withoutTrailingNonSpeech = result.replacingOccurrences(
-            of: trailingNonSpeechPattern,
+            of: edgeNonSpeechPattern,
             with: "",
             options: [.regularExpression, .caseInsensitive]
         ).trimmingCharacters(in: .whitespacesAndNewlines)

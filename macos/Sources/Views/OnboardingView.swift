@@ -7,6 +7,7 @@ struct OnboardingView: View {
 
     @EnvironmentObject var transcription: TranscriptionService
     @EnvironmentObject var permissions: PermissionManager
+    @Environment(ShortcutPreferences.self) private var shortcutPreferences
     @State private var step = 0
     @State private var showsMicrophonePermissionError = false
 
@@ -161,6 +162,11 @@ struct OnboardingView: View {
         .padding(.vertical, 40)
     }
 
+    private var shortcutHint: String {
+        let configuration = shortcutPreferences.configuration
+        return "\(configuration.chordSummary): \(configuration.behaviorSummary.lowercased())"
+    }
+
     private func requestMicrophonePermission() {
         Task {
             if await !permissions.requestMicrophone() {
@@ -194,7 +200,7 @@ struct OnboardingView: View {
                         .tracking(-0.3)
                         .foregroundStyle(.white)
 
-                    Text("Required for the Fn shortcut and pasting text into other apps")
+                    Text("Required for the recording shortcut and pasting text into other apps")
                         .font(.system(size: 13))
                         .foregroundStyle(Color.white.opacity(0.4))
                         .multilineTextAlignment(.center)
@@ -340,7 +346,7 @@ struct OnboardingView: View {
                         .tracking(-0.3)
                         .foregroundStyle(.white)
 
-                    Text("Hold Fn to dictate, release to paste")
+                    Text(shortcutHint)
                         .font(.system(size: 13))
                         .foregroundStyle(Color.white.opacity(0.4))
                 }

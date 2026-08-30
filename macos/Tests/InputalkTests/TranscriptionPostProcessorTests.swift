@@ -32,6 +32,16 @@ final class TranscriptionPostProcessorTests: XCTestCase {
         )
     }
 
+    func testRemovesLeadingMarkersAfterSpeech() {
+        XCTAssertEqual(
+            TranscriptionPostProcessor.process(
+                "[BLANK_AUDIO] Hello from Inputalk. [INAUDIBLE]",
+                removeFillerWords: false
+            ),
+            "Hello from Inputalk."
+        )
+    }
+
     func testRecognizesNonSpeechOnlyOutput() {
         XCTAssertTrue(TranscriptionPostProcessor.isNonSpeechOnly("[BLANK_AUDIO]"))
         XCTAssertTrue(TranscriptionPostProcessor.isNonSpeechOnly(" (blank audio) "))

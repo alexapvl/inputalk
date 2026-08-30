@@ -1,6 +1,6 @@
 # Inputalk
 
-Free, open-source dictation for macOS. Hold Fn, speak, release — text appears wherever your cursor is.
+Free, open-source dictation for macOS. Hold your shortcut key, speak, release — text appears wherever your cursor is.
 
 No cloud. No API keys. No cost. Transcription runs entirely on your Mac via [WhisperKit](https://github.com/argmaxinc/WhisperKit).
 
@@ -10,8 +10,9 @@ No cloud. No API keys. No cost. Transcription runs entirely on your Mac via [Whi
 
 ## How it works
 
-- **Hold Fn** — push-to-talk dictation. Release to transcribe and paste.
-- **Double-press Fn** — hands-free dictation. Press Fn again to stop.
+- **Hold the shortcut** (Right Option by default, Fn for existing users) — push-to-talk dictation. Release to transcribe and paste.
+- **Tap the shortcut** — hands-free dictation. Tap again to stop. Keys, tap vs. double-tap, and hold are configurable in Settings → Dictation.
+- **Microphone picker** in Settings and the menu bar; **History** keeps past transcripts locally (Settings → History).
 - Works in any app — Slack, VS Code, Terminal, Messages, browser, email, anything with a text field.
 
 ## Install

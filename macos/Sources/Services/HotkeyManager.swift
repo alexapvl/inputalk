@@ -43,7 +43,8 @@ final class HotkeyManager {
 
     func start() {
         guard AXIsProcessTrusted() else { return }
-        guard eventTap == nil else { return }
+        // A tap survives an Accessibility revoke/re-grant only as a dead object; rebuild it.
+        if let eventTap, CGEvent.tapIsEnabled(tap: eventTap) { return }
         stop(shouldStopRecording: false)
 
         stateMachine = ShortcutStateMachine(configuration: preferences.configuration)
@@ -115,8 +116,11 @@ final class HotkeyManager {
         let configuration = preferences.configuration
         let physicalFlags = flagsRawValue & Self.allPhysicalModifierMask
         let isExactChord = physicalFlags == configuration.deviceMask
+        let changedKeyIsSelected = configuration.modifiers.contains { $0.keyCode == keyCode }
 
-        if !exactChordWasPressed, isExactChord {
+        // Only a selected key may arm the chord: releasing an extra Shift while the
+        // chord is still held must not restart a recording that Shift just cancelled.
+        if !exactChordWasPressed, isExactChord, changedKeyIsSelected {
             exactChordWasPressed = true
             apply(stateMachine.chordPressed())
             return
@@ -130,7 +134,6 @@ final class HotkeyManager {
         }
 
         exactChordWasPressed = false
-        let changedKeyIsSelected = configuration.modifiers.contains { $0.keyCode == keyCode }
         if changedKeyIsSelected {
             apply(stateMachine.chordReleased())
         } else {

@@ -8,7 +8,7 @@ final class TranscriptionHistoryStoreTests: XCTestCase {
         let paths = temporaryStorePaths()
         defer { removeStorePaths(paths) }
 
-        let store = TranscriptionHistoryStore(databaseURL: paths.database, jsonURL: paths.json)
+        let store = TranscriptionHistoryStore(databaseURL: paths.database)
         store.append("", duration: 1)
         store.append("   \n\t", duration: 1)
         store.append("[BLANK_AUDIO]", duration: 1)
@@ -27,14 +27,14 @@ final class TranscriptionHistoryStoreTests: XCTestCase {
         let paths = temporaryStorePaths()
         defer { removeStorePaths(paths) }
 
-        let store = TranscriptionHistoryStore(databaseURL: paths.database, jsonURL: paths.json)
+        let store = TranscriptionHistoryStore(databaseURL: paths.database)
         store.append("first", duration: 1.5)
         store.append("second", duration: 2.25)
 
         XCTAssertEqual(store.entries.map(\.text), ["second", "first"])
         XCTAssertEqual(store.entries.map(\.durationSeconds), [2.25, 1.5])
 
-        let reloaded = TranscriptionHistoryStore(databaseURL: paths.database, jsonURL: paths.json)
+        let reloaded = TranscriptionHistoryStore(databaseURL: paths.database)
         XCTAssertEqual(reloaded.entries.map(\.text), ["second", "first"])
         XCTAssertEqual(reloaded.entries.map(\.durationSeconds), [2.25, 1.5])
         XCTAssertEqual(reloaded.entries.map(\.id), store.entries.map(\.id))
@@ -44,7 +44,7 @@ final class TranscriptionHistoryStoreTests: XCTestCase {
         let paths = temporaryStorePaths()
         defer { removeStorePaths(paths) }
 
-        let store = TranscriptionHistoryStore(databaseURL: paths.database, jsonURL: paths.json)
+        let store = TranscriptionHistoryStore(databaseURL: paths.database)
         for index in 1...12 {
             store.append("entry \(index)", duration: 1)
         }
@@ -58,7 +58,7 @@ final class TranscriptionHistoryStoreTests: XCTestCase {
         let paths = temporaryStorePaths()
         defer { removeStorePaths(paths) }
 
-        let store = TranscriptionHistoryStore(databaseURL: paths.database, jsonURL: paths.json)
+        let store = TranscriptionHistoryStore(databaseURL: paths.database)
         store.append("keep", duration: 1)
         store.append("drop", duration: 1)
         let dropID = store.entries[0].id
@@ -70,28 +70,17 @@ final class TranscriptionHistoryStoreTests: XCTestCase {
         XCTAssertTrue(store.entries.isEmpty)
         XCTAssertNil(store.stats)
 
-        let reloaded = TranscriptionHistoryStore(databaseURL: paths.database, jsonURL: paths.json)
+        let reloaded = TranscriptionHistoryStore(databaseURL: paths.database)
         XCTAssertTrue(reloaded.entries.isEmpty)
     }
 
-    func testImportsJSONThenDeletesItAndSkipsUntimedRowsInStats() throws {
+    func testStatsSkipUntimedRows() throws {
         let paths = temporaryStorePaths()
         defer { removeStorePaths(paths) }
 
-        let encoder = JSONEncoder()
-        encoder.dateEncodingStrategy = .iso8601
-        let legacy = [
-            LegacyHistoryFixture(id: UUID(), createdAt: Date(), text: "ten words in this old imported transcript row")
-        ]
-        try encoder.encode(legacy).write(to: paths.json)
-        XCTAssertTrue(FileManager.default.fileExists(atPath: paths.json.path))
-
-        let store = TranscriptionHistoryStore(databaseURL: paths.database, jsonURL: paths.json)
-        XCTAssertFalse(FileManager.default.fileExists(atPath: paths.json.path))
-        XCTAssertEqual(store.entries.map(\.text), ["ten words in this old imported transcript row"])
+        let store = TranscriptionHistoryStore(databaseURL: paths.database)
+        store.append("ten words in this old untimed transcript row", duration: 0)
         XCTAssertNil(store.entries.first?.durationSeconds)
-        XCTAssertNil(store.stats)
-
         store.refreshStatsIfNeeded()
         XCTAssertNil(store.stats)
 
@@ -107,7 +96,7 @@ final class TranscriptionHistoryStoreTests: XCTestCase {
         let paths = temporaryStorePaths()
         defer { removeStorePaths(paths) }
 
-        let store = TranscriptionHistoryStore(databaseURL: paths.database, jsonURL: paths.json)
+        let store = TranscriptionHistoryStore(databaseURL: paths.database)
         store.append("one two three four five", duration: 30)
         store.append("six seven eight nine ten", duration: 30)
         XCTAssertNil(store.stats)
@@ -145,7 +134,6 @@ final class TranscriptionHistoryStoreTests: XCTestCase {
     private struct StorePaths {
         let directory: URL
         let database: URL
-        let json: URL
     }
 
     private func temporaryStorePaths() -> StorePaths {
@@ -154,18 +142,11 @@ final class TranscriptionHistoryStoreTests: XCTestCase {
         try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         return StorePaths(
             directory: directory,
-            database: directory.appendingPathComponent("history.sqlite"),
-            json: directory.appendingPathComponent("history.json")
+            database: directory.appendingPathComponent("history.sqlite")
         )
     }
 
     private func removeStorePaths(_ paths: StorePaths) {
         try? FileManager.default.removeItem(at: paths.directory)
     }
-}
-
-private struct LegacyHistoryFixture: Codable {
-    let id: UUID
-    let createdAt: Date
-    let text: String
 }
