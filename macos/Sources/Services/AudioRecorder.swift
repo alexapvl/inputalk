@@ -1,25 +1,40 @@
 import AVFoundation
 import Foundation
 
-/// Thread-safe audio sample collector used by the real-time audio tap.
-/// The tap callback writes samples from the audio thread; the main thread reads on stop.
+/// Thread-safe audio sample collector used by the capture callback.
+/// The capture queue is the analyzer's only writer. The lock protects samples and spectrum
+/// snapshots read by the main thread while recording or stopping.
 private final class AudioSampleCollector: @unchecked Sendable {
     private let lock = NSLock()
+    private let spectrumAnalyzer: AudioSpectrumAnalyzer
     private var samples: ContiguousArray<Float> = []
-    private(set) var latestLevel: Float = 0
+    private var latestSpectrumLevels = AudioSpectrum.silence
 
-    func append(_ newSamples: [Float], level: Float) {
+    init(sampleRate: Float) {
+        spectrumAnalyzer = AudioSpectrumAnalyzer(sampleRate: sampleRate)
+    }
+
+    func append(_ newSamples: [Float]) {
+        let spectrumLevels = spectrumAnalyzer.analyze(newSamples)
+
         lock.lock()
         samples.append(contentsOf: newSamples)
-        latestLevel = level
+        latestSpectrumLevels = spectrumLevels
         lock.unlock()
+    }
+
+    func spectrumLevels() -> [Float] {
+        lock.lock()
+        let result = latestSpectrumLevels
+        lock.unlock()
+        return result
     }
 
     func drain() -> [Float] {
         lock.lock()
         let result = Array(samples)
         samples.removeAll(keepingCapacity: true)
-        latestLevel = 0
+        latestSpectrumLevels = AudioSpectrum.silence
         lock.unlock()
         return result
     }
@@ -27,142 +42,233 @@ private final class AudioSampleCollector: @unchecked Sendable {
     func reset() {
         lock.lock()
         samples.removeAll(keepingCapacity: true)
-        latestLevel = 0
+        latestSpectrumLevels = AudioSpectrum.silence
         lock.unlock()
     }
 }
 
-@MainActor
-class AudioRecorder: ObservableObject {
-    @Published var isRecording = false
-    @Published var audioLevel: Float = 0.0
+private final class AudioCaptureDelegate: NSObject, AVCaptureAudioDataOutputSampleBufferDelegate {
+    private let collector: AudioSampleCollector
 
-    private var audioEngine: AVAudioEngine?
-    private let collector = AudioSampleCollector()
-    private let sampleRate: Double = 16000  // WhisperKit expects 16kHz mono
-    private var levelPollTimer: Timer?
+    init(collector: AudioSampleCollector) {
+        self.collector = collector
+    }
 
-    func startRecording() throws {
-        guard !isRecording else { return }
-
-        let engine = AVAudioEngine()
-        let inputNode = engine.inputNode
-        let inputFormat = inputNode.outputFormat(forBus: 0)
-
-        guard
-            let targetFormat = AVAudioFormat(
-                commonFormat: .pcmFormatFloat32,
-                sampleRate: sampleRate,
-                channels: 1,
-                interleaved: false
+    func captureOutput(
+        _ output: AVCaptureOutput,
+        didOutput sampleBuffer: CMSampleBuffer,
+        from connection: AVCaptureConnection
+    ) {
+        guard CMSampleBufferDataIsReady(sampleBuffer),
+            let formatDescription = CMSampleBufferGetFormatDescription(sampleBuffer),
+            let streamDescription = CMAudioFormatDescriptionGetStreamBasicDescription(
+                formatDescription
             )
-        else {
-            throw AudioRecorderError.formatError
-        }
+        else { return }
 
-        guard let converter = AVAudioConverter(from: inputFormat, to: targetFormat) else {
-            throw AudioRecorderError.converterError
-        }
+        let format = streamDescription.pointee
+        guard format.mFormatID == kAudioFormatLinearPCM,
+            format.mFormatFlags & kAudioFormatFlagIsFloat != 0,
+            format.mBitsPerChannel == 32,
+            format.mChannelsPerFrame == 1
+        else { return }
 
-        collector.reset()
+        var bufferListSize = 0
+        guard
+            CMSampleBufferGetAudioBufferListWithRetainedBlockBuffer(
+                sampleBuffer,
+                bufferListSizeNeededOut: &bufferListSize,
+                bufferListOut: nil,
+                bufferListSize: 0,
+                blockBufferAllocator: nil,
+                blockBufferMemoryAllocator: nil,
+                flags: UInt32(kCMSampleBufferFlag_AudioBufferList_Assure16ByteAlignment),
+                blockBufferOut: nil
+            ) == noErr,
+            bufferListSize >= MemoryLayout<AudioBufferList>.size
+        else { return }
 
-        Self.installAudioTap(
-            on: inputNode,
-            inputFormat: inputFormat,
-            targetFormat: targetFormat,
-            converter: converter,
-            sampleRate: sampleRate,
-            collector: collector
+        let rawBufferList = UnsafeMutableRawPointer.allocate(
+            byteCount: bufferListSize,
+            alignment: MemoryLayout<AudioBufferList>.alignment
+        )
+        defer { rawBufferList.deallocate() }
+
+        let bufferList = rawBufferList.assumingMemoryBound(to: AudioBufferList.self)
+        var retainedBlockBuffer: CMBlockBuffer?
+        guard
+            CMSampleBufferGetAudioBufferListWithRetainedBlockBuffer(
+                sampleBuffer,
+                bufferListSizeNeededOut: nil,
+                bufferListOut: bufferList,
+                bufferListSize: bufferListSize,
+                blockBufferAllocator: kCFAllocatorDefault,
+                blockBufferMemoryAllocator: kCFAllocatorDefault,
+                flags: UInt32(kCMSampleBufferFlag_AudioBufferList_Assure16ByteAlignment),
+                blockBufferOut: &retainedBlockBuffer
+            ) == noErr
+        else { return }
+
+        let buffers = UnsafeMutableAudioBufferListPointer(bufferList)
+        var samples: [Float] = []
+        samples.reserveCapacity(
+            buffers.reduce(0) { $0 + Int($1.mDataByteSize) / MemoryLayout<Float>.size }
         )
 
-        try engine.start()
-        audioEngine = engine
-        isRecording = true
-
-        // Poll the collector for audio level updates on the main thread
-        levelPollTimer = Timer.scheduledTimer(withTimeInterval: 0.05, repeats: true) {
-            [weak self] _ in
-            guard let self else { return }
-            Task { @MainActor in
-                self.audioLevel = self.collector.latestLevel
-            }
+        for buffer in buffers {
+            guard let data = buffer.mData else { continue }
+            let count = Int(buffer.mDataByteSize) / MemoryLayout<Float>.size
+            samples.append(
+                contentsOf: UnsafeBufferPointer(
+                    start: data.assumingMemoryBound(to: Float.self),
+                    count: count
+                )
+            )
         }
+
+        if !samples.isEmpty {
+            collector.append(samples)
+        }
+    }
+}
+
+@MainActor
+final class AudioRecorder {
+    private static let sampleRate: Double = 16_000  // WhisperKit expects 16kHz mono
+
+    private(set) var isRecording = false
+
+    private let captureQueue = DispatchQueue(
+        label: "Inputalk.AudioCapture",
+        qos: .userInitiated
+    )
+    private var captureSession: AVCaptureSession?
+    private var captureOutput: AVCaptureAudioDataOutput?
+    private var captureDelegate: AudioCaptureDelegate?
+    private let collector = AudioSampleCollector(sampleRate: Float(sampleRate))
+
+    func startRecording(deviceUID: String) throws {
+        guard !isRecording else { return }
+
+        guard let device = Self.captureDevice(uid: deviceUID) else {
+            throw AudioRecorderError.deviceUnavailable(deviceUID)
+        }
+
+        let session = AVCaptureSession()
+        let input: AVCaptureDeviceInput
+        do {
+            input = try AVCaptureDeviceInput(device: device)
+        } catch {
+            throw AudioRecorderError.cannotOpenInput(device.localizedName)
+        }
+        let output = AVCaptureAudioDataOutput()
+        let delegate = AudioCaptureDelegate(collector: collector)
+
+        session.beginConfiguration()
+        guard session.canAddInput(input) else {
+            session.commitConfiguration()
+            throw AudioRecorderError.cannotAddInput(device.localizedName)
+        }
+        session.addInput(input)
+
+        guard session.canAddOutput(output) else {
+            session.commitConfiguration()
+            throw AudioRecorderError.cannotAddOutput
+        }
+        session.addOutput(output)
+        output.audioSettings = [
+            AVFormatIDKey: kAudioFormatLinearPCM,
+            AVSampleRateKey: Self.sampleRate,
+            AVNumberOfChannelsKey: 1,
+            AVLinearPCMBitDepthKey: 32,
+            AVLinearPCMIsFloatKey: true,
+            AVLinearPCMIsBigEndianKey: false,
+            AVLinearPCMIsNonInterleaved: false,
+        ]
+        output.setSampleBufferDelegate(delegate, queue: captureQueue)
+        session.commitConfiguration()
+
+        collector.reset()
+        captureSession = session
+        captureOutput = output
+        captureDelegate = delegate
+
+        session.startRunning()
+        guard session.isRunning else {
+            tearDownCapture()
+            throw AudioRecorderError.captureFailed
+        }
+        isRecording = true
     }
 
     func stopRecording() -> [Float] {
         guard isRecording else { return [] }
 
-        levelPollTimer?.invalidate()
-        levelPollTimer = nil
-
-        audioEngine?.inputNode.removeTap(onBus: 0)
-        audioEngine?.stop()
-        audioEngine = nil
+        tearDownCapture()
         isRecording = false
-        audioLevel = 0
 
         return collector.drain()
+    }
+
+    func currentSpectrumLevels() -> [Float] {
+        collector.spectrumLevels()
     }
 
     /// Minimum number of samples for a valid recording (0.5s at 16kHz)
     static let minimumSamples = 8000
 
-    /// Installs the audio tap in a nonisolated context so the closure
-    /// does not inherit @MainActor isolation (which would crash on the audio thread).
-    nonisolated private static func installAudioTap(
-        on inputNode: AVAudioInputNode,
-        inputFormat: AVAudioFormat,
-        targetFormat: AVAudioFormat,
-        converter: AVAudioConverter,
-        sampleRate: Double,
-        collector: AudioSampleCollector
-    ) {
-        inputNode.installTap(onBus: 0, bufferSize: 1024, format: inputFormat) {
-            buffer, _ in
+    static func duration(sampleCount: Int) -> TimeInterval {
+        Double(sampleCount) / sampleRate
+    }
 
-            let frameCount = AVAudioFrameCount(
-                Double(buffer.frameLength) * sampleRate / inputFormat.sampleRate
-            )
-            guard frameCount > 0 else { return }
+    private static func captureDevice(uid: String) -> AVCaptureDevice? {
+        AVCaptureDevice.DiscoverySession(
+            deviceTypes: [.microphone, .external],
+            mediaType: .audio,
+            position: .unspecified
+        ).devices.first { $0.uniqueID == uid }
+    }
 
-            guard
-                let convertedBuffer = AVAudioPCMBuffer(
-                    pcmFormat: targetFormat, frameCapacity: frameCount)
-            else { return }
-
-            var error: NSError?
-            let status = converter.convert(to: convertedBuffer, error: &error) {
-                _, outStatus in
-                outStatus.pointee = .haveData
-                return buffer
-            }
-
-            guard status != .error, error == nil,
-                let channelData = convertedBuffer.floatChannelData
-            else { return }
-
-            let samples = Array(
-                UnsafeBufferPointer(
-                    start: channelData[0],
-                    count: Int(convertedBuffer.frameLength)
-                ))
-
-            let rms = samples.reduce(Float(0)) { $0 + $1 * $1 }
-            let level = sqrt(rms / max(Float(samples.count), 1))
-
-            collector.append(samples, level: min(level * 5, 1.0))
+    private func tearDownCapture() {
+        captureOutput?.setSampleBufferDelegate(nil, queue: nil)
+        captureSession?.stopRunning()
+        captureQueue.sync {
+            // Wait for already-enqueued sample callbacks before draining the collector.
         }
+        captureSession = nil
+        captureOutput = nil
+        captureDelegate = nil
     }
 }
 
 enum AudioRecorderError: LocalizedError {
-    case formatError
-    case converterError
+    case deviceUnavailable(String)
+    case cannotOpenInput(String)
+    case cannotAddInput(String)
+    case cannotAddOutput
+    case captureFailed
+
+    var shouldTryFallback: Bool {
+        switch self {
+        case .deviceUnavailable, .cannotOpenInput, .cannotAddInput:
+            return true
+        case .cannotAddOutput, .captureFailed:
+            return false
+        }
+    }
 
     var errorDescription: String? {
         switch self {
-        case .formatError: return "Failed to create audio format"
-        case .converterError: return "Failed to create audio converter"
+        case .deviceUnavailable:
+            return "The selected microphone is unavailable."
+        case .cannotOpenInput(let name):
+            return "Inputalk could not open \(name)."
+        case .cannotAddInput(let name):
+            return "Inputalk could not use \(name) as an audio input."
+        case .cannotAddOutput:
+            return "Inputalk could not configure audio capture."
+        case .captureFailed:
+            return "The selected microphone could not start recording."
         }
     }
 }

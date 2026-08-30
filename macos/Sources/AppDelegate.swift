@@ -1,9 +1,18 @@
 import AppKit
-import Combine
+import CoreAudio
+import QuartzCore
 import SwiftUI
 
 enum Defaults {
     static let showInDock = "showInDock"
+    static let pasteHistoryFromMenuBar = "pasteHistoryFromMenuBar"
+    static let settingsPage = "settingsPage"
+}
+
+enum SettingsPage: String {
+    case dictation
+    case history
+    case general
 }
 
 // MARK: - App State
@@ -17,11 +26,14 @@ enum AppState {
 // MARK: - App Delegate (Menu Bar App)
 
 @MainActor
-class AppDelegate: NSObject, NSApplicationDelegate {
+class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     var statusItem: NSStatusItem!
     let audioRecorder = AudioRecorder()
+    let audioInputDevices = AudioInputDeviceManager()
     let transcriptionService = TranscriptionService()
-    let hotkeyManager = HotkeyManager()
+    let transcriptionHistory = TranscriptionHistoryStore()
+    let shortcutPreferences = ShortcutPreferences()
+    lazy var hotkeyManager = HotkeyManager(preferences: shortcutPreferences)
     let permissions = PermissionManager.shared
     let updateService = UpdateService()
 
@@ -36,11 +48,28 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     private var indicatorPanel: NSPanel?
     private var indicatorHostingView: NSHostingView<FloatingIndicatorView>?
-    private var audioLevelCancellable: AnyCancellable?
+    private let indicatorModel = FloatingIndicatorModel()
+    private var spectrumSmoother = SpectrumLevelSmoother()
     private var indicatorDismissTask: Task<Void, Never>?
+    private var indicatorDisplayLink: CADisplayLink?
+    private var lastIndicatorFrameTimestamp: CFTimeInterval?
+    private var indicatorNeedsInitialFrame = false
+    private var microphoneMenu: NSMenu?
+    private var activeInputDeviceID: AudioDeviceID?
+    private var activeInputDeviceName: String?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        UserDefaults.standard.register(defaults: [Defaults.showInDock: true])
+        UserDefaults.standard.register(defaults: [
+            Defaults.showInDock: true,
+            Defaults.pasteHistoryFromMenuBar: true,
+        ])
+
+        shortcutPreferences.onChange = { [weak self] in
+            self?.hotkeyManager.reloadConfiguration()
+        }
+        audioInputDevices.onDevicesChanged = { [weak self] in
+            self?.handleAudioInputDevicesChanged()
+        }
 
         setupMainMenu()
         setupMenuBar()
@@ -107,37 +136,49 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     // MARK: - Recording Flow
 
     private func startRecording() {
+        indicatorModel.notice = nil
+
         do {
-            try audioRecorder.startRecording()
+            var resolution = try audioInputDevices.resolutionForRecording()
+            do {
+                try audioRecorder.startRecording(deviceUID: resolution.deviceUID)
+            } catch let error as AudioRecorderError where error.shouldTryFallback {
+                resolution = try audioInputDevices.fallbackResolution(
+                    preferredName: resolution.name)
+                try audioRecorder.startRecording(deviceUID: resolution.deviceUID)
+            }
+
             appState = .recording
             updateMenuBarIcon(state: .recording)
-            showIndicator(state: .recording(level: 0))
-
-            // Subscribe to audio level updates
-            audioLevelCancellable = audioRecorder.$audioLevel
-                .receive(on: RunLoop.main)
-                .sink { [weak self] level in
-                    self?.updateIndicator(state: .recording(level: level))
-                }
+            spectrumSmoother.reset()
+            indicatorModel.spectrumLevels = AudioSpectrum.silence
+            showIndicator(state: .recording)
+            indicatorModel.notice = resolution.fallbackNotice?.message
+            activeInputDeviceID = resolution.deviceID
+            activeInputDeviceName = resolution.name
         } catch {
             print("Failed to start recording: \(error)")
+            showTransientWarning(error.localizedDescription)
         }
     }
 
     private func stopRecordingAndTranscribe() {
         guard audioRecorder.isRecording else { return }
 
-        audioLevelCancellable?.cancel()
-        audioLevelCancellable = nil
-
         let samples = audioRecorder.stopRecording()
+        activeInputDeviceID = nil
+        activeInputDeviceName = nil
         appState = .processing
         updateMenuBarIcon(state: .processing)
 
         guard samples.count >= AudioRecorder.minimumSamples else {
             appState = .idle
             updateMenuBarIcon(state: .idle)
-            dismissIndicator()
+            if let notice = indicatorModel.notice {
+                showTransientWarning(notice)
+            } else {
+                showNonSpeechWarning()
+            }
             return
         }
 
@@ -148,15 +189,20 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 // transcribe() waits for the model if it's still loading —
                 // the user just sees "Transcribing" a bit longer on first use
                 let text = try await transcriptionService.transcribe(audioSamples: samples)
-                if !text.isEmpty {
+                if TranscriptionPostProcessor.isNonSpeechOnly(text) {
+                    showNonSpeechWarning(text)
+                } else {
+                    transcriptionHistory.append(
+                        text,
+                        duration: AudioRecorder.duration(sampleCount: samples.count)
+                    )
                     TextInserter.insertText(text)
                     updateIndicator(state: .done(text: text))
+                    let dismissalDelay = indicatorModel.notice == nil ? 1.5 : 4
                     indicatorDismissTask = Task {
-                        try? await Task.sleep(nanoseconds: 1_500_000_000)
+                        try? await Task.sleep(for: .seconds(dismissalDelay))
                         dismissIndicator()
                     }
-                } else {
-                    dismissIndicator()
                 }
             } catch {
                 print("Transcription failed: \(error)")
@@ -168,11 +214,48 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    private func handleAudioInputDevicesChanged() {
+        guard audioRecorder.isRecording,
+            let activeInputDeviceID,
+            !audioInputDevices.devices.contains(where: { $0.id == activeInputDeviceID })
+        else { return }
+
+        let disconnectedName = activeInputDeviceName ?? "Microphone"
+        if let fallbackName = audioInputDevices.fallbackDeviceName {
+            indicatorModel.notice =
+                "\(disconnectedName) disconnected. Recording stopped. Next recording will use \(fallbackName)."
+        } else {
+            indicatorModel.notice =
+                "\(disconnectedName) disconnected. Recording stopped. No fallback microphone is available."
+        }
+        stopRecordingAndTranscribe()
+    }
+
+    private func showNonSpeechWarning(
+        _ text: String = TranscriptionPostProcessor.blankAudioMarker
+    ) {
+        updateIndicator(state: .warning(text: text))
+        indicatorDismissTask = Task {
+            try? await Task.sleep(for: .seconds(1.5))
+            dismissIndicator()
+        }
+    }
+
+    private func showTransientWarning(_ message: String) {
+        indicatorModel.notice = nil
+        showIndicator(state: .warning(text: message))
+        indicatorDismissTask = Task {
+            try? await Task.sleep(for: .seconds(4))
+            dismissIndicator()
+        }
+    }
+
     // MARK: - Floating Indicator
 
     private func showIndicator(state: IndicatorState) {
         indicatorDismissTask?.cancel()
         indicatorDismissTask = nil
+        indicatorModel.state = state
 
         if indicatorPanel == nil {
             let panel = NSPanel(
@@ -188,49 +271,102 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
             panel.ignoresMouseEvents = true
 
-            let hostingView = NSHostingView(rootView: FloatingIndicatorView(state: state))
+            let hostingView = NSHostingView(rootView: FloatingIndicatorView(model: indicatorModel))
             hostingView.sizingOptions = .intrinsicContentSize
             panel.contentView = hostingView
 
             indicatorPanel = panel
             indicatorHostingView = hostingView
-        } else {
-            indicatorHostingView?.rootView = FloatingIndicatorView(state: state)
         }
 
-        positionIndicatorAtScreenBottom()
+        indicatorPanel?.alphaValue = 0
+        indicatorNeedsInitialFrame = true
+        positionIndicatorNearCursor()
         indicatorPanel?.orderFrontRegardless()
+        startIndicatorTracking()
     }
 
     private func updateIndicator(state: IndicatorState) {
-        indicatorHostingView?.rootView = FloatingIndicatorView(state: state)
-        // Resize in case content changed
-        positionIndicatorAtScreenBottom()
+        indicatorModel.state = state
+        if state != .recording {
+            indicatorModel.spectrumLevels = AudioSpectrum.silence
+        }
+        positionIndicatorNearCursor()
     }
 
     private func dismissIndicator() {
         indicatorDismissTask?.cancel()
         indicatorDismissTask = nil
-        audioLevelCancellable?.cancel()
-        audioLevelCancellable = nil
+        indicatorDisplayLink?.invalidate()
+        indicatorDisplayLink = nil
+        lastIndicatorFrameTimestamp = nil
         indicatorPanel?.orderOut(nil)
+        indicatorPanel?.contentView = nil
+        indicatorHostingView = nil
+        indicatorPanel = nil
+        indicatorNeedsInitialFrame = false
+        indicatorModel.notice = nil
     }
 
-    private func positionIndicatorAtScreenBottom() {
+    private func startIndicatorTracking() {
+        guard indicatorDisplayLink == nil, let panel = indicatorPanel else { return }
+
+        let displayLink = panel.displayLink(
+            target: self,
+            selector: #selector(updateIndicatorFrame(_:))
+        )
+        displayLink.add(to: .main, forMode: .common)
+        indicatorDisplayLink = displayLink
+    }
+
+    @objc private func updateIndicatorFrame(_ displayLink: CADisplayLink) {
+        let deltaTime = lastIndicatorFrameTimestamp.map {
+            displayLink.timestamp - $0
+        } ?? displayLink.duration
+        lastIndicatorFrameTimestamp = displayLink.timestamp
+
+        if appState == .recording {
+            indicatorModel.spectrumLevels = spectrumSmoother.update(
+                targetLevels: audioRecorder.currentSpectrumLevels(),
+                deltaTime: deltaTime
+            )
+        }
+
+        positionIndicatorNearCursor()
+
+        if indicatorNeedsInitialFrame {
+            indicatorHostingView?.layoutSubtreeIfNeeded()
+            indicatorPanel?.displayIfNeeded()
+            indicatorPanel?.alphaValue = 1
+            indicatorNeedsInitialFrame = false
+        }
+    }
+
+    private func positionIndicatorNearCursor() {
         guard let panel = indicatorPanel,
             let hostingView = indicatorHostingView,
-            let screen = NSScreen.main
+            let screen = screenContainingMouse()
         else { return }
 
+        hostingView.layoutSubtreeIfNeeded()
         let contentSize = hostingView.fittingSize
-        let screenFrame = screen.visibleFrame
-        let x = screenFrame.midX - contentSize.width / 2
-        let y = screenFrame.minY + 40  // 40pt above the bottom of the visible area
-
-        panel.setFrame(
-            NSRect(x: x, y: y, width: contentSize.width, height: contentSize.height),
-            display: true
+        let origin = FloatingIndicatorPositioner.origin(
+            cursor: NSEvent.mouseLocation,
+            contentSize: contentSize,
+            visibleFrame: screen.visibleFrame
         )
+        let frame = NSRect(origin: origin, size: contentSize)
+
+        guard panel.frame != frame else { return }
+
+        panel.setFrame(frame, display: true)
+    }
+
+    private func screenContainingMouse() -> NSScreen? {
+        let mouseLocation = NSEvent.mouseLocation
+        return NSScreen.screens.first {
+            NSMouseInRect(mouseLocation, $0.frame, false)
+        } ?? NSScreen.main
     }
 
     // MARK: - Main Menu
@@ -247,6 +383,13 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 title: "About Inputalk",
                 action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)),
                 keyEquivalent: ""))
+        let settingsItem = NSMenuItem(
+            title: "Settings...",
+            action: #selector(showSettingsAction),
+            keyEquivalent: ","
+        )
+        settingsItem.target = self
+        appMenu.addItem(settingsItem)
         appMenu.addItem(.separator())
         appMenu.addItem(
             NSMenuItem(
@@ -318,12 +461,13 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     func updateMenuBarIcon(state: AppState) {
         guard let button = statusItem.button else { return }
         button.image = menuBarImage(for: state)
-        button.contentTintColor = state == .recording ? .systemRed : nil
+        button.contentTintColor = nil
+        button.toolTip = state == .recording ? "Inputalk is recording" : "Inputalk"
     }
 
     private func menuBarImage(for state: AppState) -> NSImage? {
         switch state {
-        case .idle:
+        case .idle, .recording:
             // Custom waveform icon from SPM resource bundle
             if let url = Bundle.module.url(forResource: "MenuBarIcon", withExtension: "png"),
                 let image = NSImage(contentsOf: url)
@@ -336,11 +480,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             let image = NSImage(
                 systemSymbolName: "waveform", accessibilityDescription: "Inputalk")
             image?.isTemplate = true
-            return image
-        case .recording:
-            let image = NSImage(
-                systemSymbolName: "waveform", accessibilityDescription: "Recording")
-            image?.isTemplate = false
             return image
         case .processing:
             let image = NSImage(
@@ -357,6 +496,25 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func showContextMenu() {
         let menu = NSMenu()
+
+        let microphoneItem = NSMenuItem(
+            title: "Microphone", action: nil, keyEquivalent: "")
+        let microphoneMenu = NSMenu(title: "Microphone")
+        microphoneMenu.delegate = self
+        microphoneItem.submenu = microphoneMenu
+        menu.addItem(microphoneItem)
+        self.microphoneMenu = microphoneMenu
+        rebuildMicrophoneMenu(microphoneMenu)
+
+        menu.addItem(NSMenuItem.separator())
+
+        let historyItem = NSMenuItem(title: "History", action: nil, keyEquivalent: "")
+        let historyMenu = NSMenu(title: "History")
+        rebuildHistoryMenu(historyMenu)
+        historyItem.submenu = historyMenu
+        menu.addItem(historyItem)
+
+        menu.addItem(NSMenuItem.separator())
 
         let settingsItem = NSMenuItem(
             title: "Settings...", action: #selector(showSettingsAction), keyEquivalent: ",")
@@ -379,6 +537,127 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         statusItem.menu = menu
         statusItem.button?.performClick(nil)
         statusItem.menu = nil
+        self.microphoneMenu = nil
+    }
+
+    func menuWillOpen(_ menu: NSMenu) {
+        guard menu === microphoneMenu else { return }
+        audioInputDevices.refresh()
+        rebuildMicrophoneMenu(menu)
+    }
+
+    private func rebuildMicrophoneMenu(_ menu: NSMenu) {
+        menu.removeAllItems()
+        let canChangeDevice = appState != .recording
+
+        let systemDefaultItem = NSMenuItem(
+            title: audioInputDevices.selectedDefaultLabel,
+            action: #selector(selectMicrophoneFromMenu(_:)),
+            keyEquivalent: ""
+        )
+        systemDefaultItem.target = self
+        systemDefaultItem.state = audioInputDevices.selection == .systemDefault ? .on : .off
+        systemDefaultItem.isEnabled = canChangeDevice
+        menu.addItem(systemDefaultItem)
+        menu.addItem(.separator())
+
+        for device in audioInputDevices.devices {
+            let item = NSMenuItem(
+                title: device.name,
+                action: #selector(selectMicrophoneFromMenu(_:)),
+                keyEquivalent: ""
+            )
+            item.target = self
+            item.representedObject = device.uid
+            item.state = audioInputDevices.selection == .device(uid: device.uid) ? .on : .off
+            item.isEnabled = canChangeDevice
+            menu.addItem(item)
+        }
+
+        if audioInputDevices.devices.isEmpty {
+            let unavailableItem = NSMenuItem(
+                title: "No microphones available", action: nil, keyEquivalent: "")
+            unavailableItem.isEnabled = false
+            menu.addItem(unavailableItem)
+        } else if case .device(let uid) = audioInputDevices.selection,
+            audioInputDevices.selectedDevice == nil
+        {
+            let unavailableItem = NSMenuItem(
+                title: "\(audioInputDevices.selectedDeviceName) (Unavailable)",
+                action: nil,
+                keyEquivalent: ""
+            )
+            unavailableItem.state = .on
+            unavailableItem.isEnabled = false
+            unavailableItem.representedObject = uid
+            menu.addItem(unavailableItem)
+        }
+
+        if audioInputDevices.unavailableSelectionMessage != nil,
+            let fallbackName = audioInputDevices.fallbackDeviceName
+        {
+            menu.addItem(.separator())
+            let statusItem = NSMenuItem(
+                title: "Using \(fallbackName) as fallback",
+                action: nil,
+                keyEquivalent: ""
+            )
+            statusItem.isEnabled = false
+            menu.addItem(statusItem)
+        } else if appState == .recording {
+            menu.addItem(.separator())
+            let statusItem = NSMenuItem(
+                title: "Stop recording before switching microphones",
+                action: nil,
+                keyEquivalent: ""
+            )
+            statusItem.isEnabled = false
+            menu.addItem(statusItem)
+        }
+    }
+
+    @objc private func selectMicrophoneFromMenu(_ sender: NSMenuItem) {
+        if let uid = sender.representedObject as? String {
+            audioInputDevices.select(.device(uid: uid))
+        } else {
+            audioInputDevices.select(.systemDefault)
+        }
+    }
+
+    private func rebuildHistoryMenu(_ menu: NSMenu) {
+        menu.removeAllItems()
+
+        let recent = Array(transcriptionHistory.entries.prefix(5))
+        guard !recent.isEmpty else {
+            let emptyItem = NSMenuItem(
+                title: "No transcripts yet", action: nil, keyEquivalent: "")
+            emptyItem.isEnabled = false
+            menu.addItem(emptyItem)
+            return
+        }
+
+        for entry in recent {
+            let item = NSMenuItem(
+                title: TranscriptionHistoryStore.menuTitle(for: entry.text),
+                action: #selector(copyHistoryFromMenu(_:)),
+                keyEquivalent: ""
+            )
+            item.target = self
+            item.representedObject = NSNumber(value: entry.id)
+            item.toolTip = entry.text
+            menu.addItem(item)
+        }
+    }
+
+    @objc private func copyHistoryFromMenu(_ sender: NSMenuItem) {
+        guard let id = (sender.representedObject as? NSNumber)?.int64Value,
+            let entry = transcriptionHistory.entries.first(where: { $0.id == id })
+        else { return }
+
+        transcriptionHistory.copyToPasteboard(entry)
+
+        guard UserDefaults.standard.bool(forKey: Defaults.pasteHistoryFromMenuBar) else { return }
+        TextInserter.insertText(entry.text)
     }
 
     // MARK: - Windows
@@ -407,6 +686,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                     .environmentObject(transcriptionService)
                     .environmentObject(permissions)
                     .environmentObject(updateService)
+                    .environment(shortcutPreferences)
+                    .environment(audioInputDevices)
+                    .environment(transcriptionHistory)
             )
             window.isReleasedWhenClosed = false
             window.delegate = self

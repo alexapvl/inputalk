@@ -139,36 +139,70 @@ class TranscriptionService: ObservableObject {
         )
 
         let text = results.map { $0.text }.joined(separator: " ")
-        return postProcess(text)
+        let removeFillerWords = UserDefaults.standard.object(forKey: "removeFillerWords") == nil
+            || UserDefaults.standard.bool(forKey: "removeFillerWords")
+        return TranscriptionPostProcessor.process(
+            text,
+            removeFillerWords: removeFillerWords
+        )
+    }
+}
+
+enum TranscriptionPostProcessor {
+    static let blankAudioMarker = "[BLANK_AUDIO]"
+
+    /// True when Whisper produced only status markers or sound-event tags
+    /// such as `[BLANK_AUDIO]`, `[INAUDIBLE]`, `(claps)`, or `(cars honking)`.
+    static func isNonSpeechOnly(_ text: String) -> Bool {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return false }
+        let withoutTokens = trimmed.replacingOccurrences(
+            of: #"[\(\[][^\[\]()]+[\)\]]"#,
+            with: " ",
+            options: .regularExpression
+        )
+        return withoutTokens
+            .trimmingCharacters(in: .whitespacesAndNewlines.union(.punctuationCharacters))
+            .isEmpty
     }
 
-    // MARK: - Post-Processing
-
-    private func postProcess(_ text: String) -> String {
+    static func process(_ text: String, removeFillerWords: Bool) -> String {
         var result = text.trimmingCharacters(in: .whitespacesAndNewlines)
 
-        guard UserDefaults.standard.object(forKey: "removeFillerWords") == nil
-            || UserDefaults.standard.bool(forKey: "removeFillerWords")
-        else {
-            return result
+        let trailingNonSpeechPattern =
+            #"(?:\s*(?:\[[A-Za-z][A-Za-z_\s-]*\]|\((?:blank[\s_-]*audio|silence)\)))+\s*$"#
+        let withoutTrailingNonSpeech = result.replacingOccurrences(
+            of: trailingNonSpeechPattern,
+            with: "",
+            options: [.regularExpression, .caseInsensitive]
+        ).trimmingCharacters(in: .whitespacesAndNewlines)
+
+        if !withoutTrailingNonSpeech.isEmpty {
+            result = withoutTrailingNonSpeech
         }
 
-        let fillerPatterns = [
-            "\\b[Uu]m\\b,?\\s?",
-            "\\b[Uu]h\\b,?\\s?",
-        ]
+        if removeFillerWords {
+            let fillerPatterns = [
+                "\\b[Uu]m\\b,?\\s?",
+                "\\b[Uu]h\\b,?\\s?",
+            ]
 
-        for pattern in fillerPatterns {
-            result =
-                result.replacingOccurrences(
-                    of: pattern, with: "", options: .regularExpression)
+            for pattern in fillerPatterns {
+                result = result.replacingOccurrences(
+                    of: pattern,
+                    with: "",
+                    options: .regularExpression
+                )
+            }
+
+            while result.contains("  ") {
+                result = result.replacingOccurrences(of: "  ", with: " ")
+            }
+
+            result = result.trimmingCharacters(in: .whitespacesAndNewlines)
         }
 
-        while result.contains("  ") {
-            result = result.replacingOccurrences(of: "  ", with: " ")
-        }
-
-        return result.trimmingCharacters(in: .whitespacesAndNewlines)
+        return result.isEmpty ? blankAudioMarker : result
     }
 }
 

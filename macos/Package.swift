@@ -24,7 +24,17 @@ let package = Package(
             ],
             swiftSettings: [
                 .define("DEBUG", .when(configuration: .debug)),
+            ],
+            linkerSettings: [
+                .linkedLibrary("sqlite3"),
             ]
-        )
+        ),
+        .testTarget(
+            name: "InputalkTests",
+            dependencies: ["Inputalk"],
+            linkerSettings: [
+                .linkedLibrary("sqlite3"),
+            ]
+        ),
     ]
 )

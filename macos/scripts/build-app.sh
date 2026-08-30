@@ -160,14 +160,6 @@ if [ ! -z "$CODE_SIGN_IDENTITY" ]; then
             "$SPARKLE_FRAMEWORK_PATH"
     fi
 
-    RESOURCE_BUNDLE_PATH="$APP_BUNDLE/Contents/Resources/Inputalk_Inputalk.bundle"
-    if [ -d "$RESOURCE_BUNDLE_PATH" ]; then
-        echo -e "${BLUE}Signing nested resource bundle...${NC}"
-        codesign --force --sign "$CODE_SIGN_IDENTITY" \
-            --timestamp \
-            "$RESOURCE_BUNDLE_PATH"
-    fi
-
     echo -e "${BLUE}Signing main app bundle...${NC}"
     codesign --force --sign "$CODE_SIGN_IDENTITY" \
         --entitlements "Resources/Inputalk.entitlements" \

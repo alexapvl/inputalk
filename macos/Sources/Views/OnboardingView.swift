@@ -8,6 +8,7 @@ struct OnboardingView: View {
     @EnvironmentObject var transcription: TranscriptionService
     @EnvironmentObject var permissions: PermissionManager
     @State private var step = 0
+    @State private var showsMicrophonePermissionError = false
 
     private let totalSteps = 5
 
@@ -52,6 +53,19 @@ struct OnboardingView: View {
             }
         }
         .frame(width: 460, height: 480)
+        .alert(
+            "Microphone Access Required",
+            isPresented: $showsMicrophonePermissionError
+        ) {
+            Button("Close", role: .cancel) {}
+            Button("Open Microphone Settings") {
+                permissions.openMicrophoneSettings()
+            }
+        } message: {
+            Text(
+                "Inputalk could not access the microphone. Allow microphone access in System Settings, then return to Inputalk."
+            )
+        }
     }
 
     // MARK: - Step 0: Welcome
@@ -130,7 +144,7 @@ struct OnboardingView: View {
                     }
                 } else {
                     OnboardingPillButton("Grant Permission") {
-                        Task { await permissions.requestMicrophone() }
+                        requestMicrophonePermission()
                     }
 
                     Button(action: { withAnimation { step = 2 } }) {
@@ -145,6 +159,14 @@ struct OnboardingView: View {
         }
         .padding(.horizontal, 48)
         .padding(.vertical, 40)
+    }
+
+    private func requestMicrophonePermission() {
+        Task {
+            if await !permissions.requestMicrophone() {
+                showsMicrophonePermissionError = true
+            }
+        }
     }
 
     // MARK: - Step 2: Accessibility
