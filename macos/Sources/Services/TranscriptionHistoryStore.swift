@@ -29,7 +29,6 @@ final class TranscriptionHistoryStore {
     private let handle = SQLiteHandle()
     private var database: OpaquePointer? { handle.db }
     private let databaseURL: URL
-    private let jsonURL: URL
     private var statsNeedRefresh = true
 
     private let isoFormatter: ISO8601DateFormatter = {
@@ -51,18 +50,9 @@ final class TranscriptionHistoryStore {
         defaultDirectory.appendingPathComponent("history.sqlite", isDirectory: false)
     }
 
-    static var defaultJSONURL: URL {
-        defaultDirectory.appendingPathComponent("history.json", isDirectory: false)
-    }
-
-    init(
-        databaseURL: URL = TranscriptionHistoryStore.defaultDatabaseURL,
-        jsonURL: URL = TranscriptionHistoryStore.defaultJSONURL
-    ) {
+    init(databaseURL: URL = TranscriptionHistoryStore.defaultDatabaseURL) {
         self.databaseURL = databaseURL
-        self.jsonURL = jsonURL
         openDatabase()
-        migrateJSONIfNeeded()
         entries = loadEntries()
     }
 
@@ -97,18 +87,17 @@ final class TranscriptionHistoryStore {
     }
 
     func remove(id: Int64) {
-        let before = entries.count
+        guard entries.contains(where: { $0.id == id }),
+            execute("DELETE FROM transcripts WHERE id = \(id)")
+        else { return }
         entries.removeAll { $0.id == id }
-        guard entries.count != before else { return }
-        execute("DELETE FROM transcripts WHERE id = \(id)")
         statsNeedRefresh = true
         refreshStatsIfNeeded()
     }
 
     func clear() {
-        guard !entries.isEmpty else { return }
+        guard !entries.isEmpty, execute("DELETE FROM transcripts") else { return }
         entries = []
-        execute("DELETE FROM transcripts")
         statsNeedRefresh = true
         stats = nil
         refreshStatsIfNeeded()
@@ -169,6 +158,7 @@ final class TranscriptionHistoryStore {
             return
         }
         handle.db = db
+        sqlite3_busy_timeout(db, 1_000)
         execute("PRAGMA journal_mode = WAL")
         execute("PRAGMA foreign_keys = ON")
 
@@ -189,33 +179,6 @@ final class TranscriptionHistoryStore {
             )
             setUserVersion(1)
         }
-    }
-
-    private func migrateJSONIfNeeded() {
-        guard FileManager.default.fileExists(atPath: jsonURL.path) else { return }
-
-        if rowCount() == 0 {
-            let decoder = JSONDecoder()
-            decoder.dateDecodingStrategy = .iso8601
-            if let data = try? Data(contentsOf: jsonURL),
-                let legacy = try? decoder.decode([LegacyHistoryEntry].self, from: data)
-            {
-                execute("BEGIN")
-                for item in legacy.reversed() {
-                    let trimmed = item.text.trimmingCharacters(in: .whitespacesAndNewlines)
-                    guard !trimmed.isEmpty else { continue }
-                    _ = insert(
-                        createdAt: item.createdAt,
-                        text: trimmed,
-                        durationSeconds: nil,
-                        wordCount: Self.wordCount(in: trimmed)
-                    )
-                }
-                execute("COMMIT")
-            }
-        }
-
-        try? FileManager.default.removeItem(at: jsonURL)
     }
 
     private func loadEntries() -> [TranscriptionHistoryEntry] {
@@ -365,10 +328,4 @@ private final class SQLiteHandle: @unchecked Sendable {
             sqlite3_close(db)
         }
     }
-}
-
-private struct LegacyHistoryEntry: Codable {
-    let id: UUID
-    let createdAt: Date
-    let text: String
 }

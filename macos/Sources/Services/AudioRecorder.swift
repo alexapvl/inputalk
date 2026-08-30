@@ -109,21 +109,25 @@ private final class AudioCaptureDelegate: NSObject, AVCaptureAudioDataOutputSamp
             ) == noErr
         else { return }
 
-        let buffers = UnsafeMutableAudioBufferListPointer(bufferList)
-        var samples: [Float] = []
-        samples.reserveCapacity(
-            buffers.reduce(0) { $0 + Int($1.mDataByteSize) / MemoryLayout<Float>.size }
-        )
-
-        for buffer in buffers {
-            guard let data = buffer.mData else { continue }
-            let count = Int(buffer.mDataByteSize) / MemoryLayout<Float>.size
-            samples.append(
-                contentsOf: UnsafeBufferPointer(
-                    start: data.assumingMemoryBound(to: Float.self),
-                    count: count
-                )
+        // The buffer list points into storage owned by the block buffer; keep it alive while reading.
+        let samples: [Float] = withExtendedLifetime(retainedBlockBuffer) {
+            let buffers = UnsafeMutableAudioBufferListPointer(bufferList)
+            var samples: [Float] = []
+            samples.reserveCapacity(
+                buffers.reduce(0) { $0 + Int($1.mDataByteSize) / MemoryLayout<Float>.size }
             )
+
+            for buffer in buffers {
+                guard let data = buffer.mData else { continue }
+                let count = Int(buffer.mDataByteSize) / MemoryLayout<Float>.size
+                samples.append(
+                    contentsOf: UnsafeBufferPointer(
+                        start: data.assumingMemoryBound(to: Float.self),
+                        count: count
+                    )
+                )
+            }
+            return samples
         }
 
         if !samples.isEmpty {

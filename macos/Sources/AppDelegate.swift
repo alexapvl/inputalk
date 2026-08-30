@@ -144,7 +144,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 try audioRecorder.startRecording(deviceUID: resolution.deviceUID)
             } catch let error as AudioRecorderError where error.shouldTryFallback {
                 resolution = try audioInputDevices.fallbackResolution(
-                    preferredName: resolution.name)
+                    preferredName: resolution.name,
+                    excludingUID: resolution.deviceUID
+                )
                 try audioRecorder.startRecording(deviceUID: resolution.deviceUID)
             }
 
@@ -198,11 +200,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                     )
                     TextInserter.insertText(text)
                     updateIndicator(state: .done(text: text))
-                    let dismissalDelay = indicatorModel.notice == nil ? 1.5 : 4
-                    indicatorDismissTask = Task {
-                        try? await Task.sleep(for: .seconds(dismissalDelay))
-                        dismissIndicator()
-                    }
+                    scheduleIndicatorDismissal(after: indicatorModel.notice == nil ? 1.5 : 4)
                 }
             } catch {
                 print("Transcription failed: \(error)")
@@ -235,17 +233,20 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         _ text: String = TranscriptionPostProcessor.blankAudioMarker
     ) {
         updateIndicator(state: .warning(text: text))
-        indicatorDismissTask = Task {
-            try? await Task.sleep(for: .seconds(1.5))
-            dismissIndicator()
-        }
+        scheduleIndicatorDismissal(after: 1.5)
     }
 
     private func showTransientWarning(_ message: String) {
         indicatorModel.notice = nil
         showIndicator(state: .warning(text: message))
+        scheduleIndicatorDismissal(after: 4)
+    }
+
+    private func scheduleIndicatorDismissal(after seconds: Double) {
+        indicatorDismissTask?.cancel()
         indicatorDismissTask = Task {
-            try? await Task.sleep(for: .seconds(4))
+            // A cancelled sleep must not tear down the indicator a newer recording just showed.
+            guard (try? await Task.sleep(for: .seconds(seconds))) != nil else { return }
             dismissIndicator()
         }
     }
@@ -654,10 +655,12 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             let entry = transcriptionHistory.entries.first(where: { $0.id == id })
         else { return }
 
-        transcriptionHistory.copyToPasteboard(entry)
-
-        guard UserDefaults.standard.bool(forKey: Defaults.pasteHistoryFromMenuBar) else { return }
-        TextInserter.insertText(entry.text)
+        // Paste mode restores the user's clipboard afterwards; copy mode replaces it.
+        if UserDefaults.standard.bool(forKey: Defaults.pasteHistoryFromMenuBar) {
+            TextInserter.insertText(entry.text)
+        } else {
+            transcriptionHistory.copyToPasteboard(entry)
+        }
     }
 
     // MARK: - Windows
@@ -716,6 +719,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 })
                 .environmentObject(self.transcriptionService)
                 .environmentObject(self.permissions)
+                .environment(self.shortcutPreferences)
             )
             window.isReleasedWhenClosed = false
             window.delegate = self

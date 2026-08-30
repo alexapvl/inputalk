@@ -488,8 +488,11 @@ final class AudioInputDeviceManager: NSObject {
         }
     }
 
-    func fallbackResolution(preferredName: String) throws -> AudioInputResolution {
-        guard let fallback = fallbackDevice() else {
+    func fallbackResolution(
+        preferredName: String,
+        excludingUID: String? = nil
+    ) throws -> AudioInputResolution {
+        guard let fallback = fallbackDevice(excludingUID: excludingUID) else {
             throw AudioInputDeviceManagerError.noInputDevices
         }
         let notice = AudioInputFallbackNotice(
@@ -505,8 +508,9 @@ final class AudioInputDeviceManager: NSObject {
         )
     }
 
-    private func fallbackDevice() -> AudioInputDevice? {
-        defaultInputDevice ?? devices.first
+    private func fallbackDevice(excludingUID: String? = nil) -> AudioInputDevice? {
+        let candidates = devices.filter { $0.uid != excludingUID }
+        return candidates.first { $0.id == defaultInputDeviceID } ?? candidates.first
     }
 }
 
