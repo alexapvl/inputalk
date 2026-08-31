@@ -47,8 +47,12 @@ final class HotkeyManager {
         if let eventTap, CGEvent.tapIsEnabled(tap: eventTap) { return }
         stop(shouldStopRecording: false)
 
-        stateMachine = ShortcutStateMachine(configuration: preferences.configuration)
-        exactChordWasPressed = false
+        // Rebuilding means the old tap was dead and gesture events were likely
+        // missed. Reconcile like a tap timeout: a hold whose release was lost
+        // stops now, while a toggle recording stays stoppable by the next tap.
+        // Never discard the state machine here — replacing it while a recording
+        // is active orphans that recording from the hotkey layer.
+        apply(stateMachine.cancelPendingGesture())
 
         if preferences.configuration.modifiers.contains(.fn) {
             disableSystemFnBehavior()
@@ -63,9 +67,10 @@ final class HotkeyManager {
             let tap = CGEvent.tapCreate(
                 tap: .cgSessionEventTap,
                 place: .headInsertEventTap,
-                // Accessibility already covers Inputalk's text insertion. The callback
-                // returns every event unchanged, so this active tap never blocks input.
-                options: .defaultTap,
+                // The callback never modifies events, so a passive tap suffices.
+                // Unlike an active tap, a slow main run loop then delays only
+                // this observer, not the user's keystrokes.
+                options: .listenOnly,
                 eventsOfInterest: eventMask,
                 callback: hotkeyEventCallback,
                 userInfo: userInfo
@@ -86,14 +91,16 @@ final class HotkeyManager {
     }
 
     func reloadConfiguration() {
-        apply(stateMachine.reset())
+        apply(stateMachine.updateConfiguration(preferences.configuration))
         stop(shouldStopRecording: false)
         start()
     }
 
-    func cancelRecording() {
-        apply(stateMachine.reset())
-        exactChordWasPressed = false
+    /// The app stopped recording without a hotkey gesture (microphone
+    /// disconnect, failed capture start). Keeps the gesture phases aligned
+    /// with the recorder so the next gesture starts fresh.
+    func recordingWasStopped() {
+        apply(stateMachine.externalRecordingStopped())
     }
 
     fileprivate func handleEvent(type: CGEventType, keyCode: UInt16, flagsRawValue: UInt64) {

@@ -97,6 +97,71 @@ final class ShortcutConfigurationTests: XCTestCase {
         XCTAssertEqual(toggleStateMachine.ordinaryKeyPressed(), [])
     }
 
+    func testExternalStopDuringToggleLetsNextTapStartFresh() {
+        var stateMachine = ShortcutStateMachine(configuration: .newInstallDefault)
+        _ = stateMachine.chordPressed()
+        XCTAssertEqual(stateMachine.chordReleased(), [.cancelHold, .startRecording])
+
+        // Microphone disconnect stops the recording outside the hotkey layer.
+        XCTAssertEqual(stateMachine.externalRecordingStopped(), [])
+
+        // The next tap starts a new recording instead of sending a stale stop.
+        XCTAssertEqual(stateMachine.chordPressed(), [.scheduleHold])
+        XCTAssertEqual(stateMachine.chordReleased(), [.cancelHold, .startRecording])
+    }
+
+    func testExternalStopDuringHoldMakesReleaseInert() {
+        var stateMachine = ShortcutStateMachine(configuration: .newInstallDefault)
+        _ = stateMachine.chordPressed()
+        XCTAssertEqual(stateMachine.holdThresholdElapsed(), [.startRecording])
+
+        // Capture start failed while the chord is still held.
+        XCTAssertEqual(stateMachine.externalRecordingStopped(), [])
+        XCTAssertEqual(stateMachine.chordReleased(), [])
+    }
+
+    func testExternalStopDuringStoppingToggleReturnsToIdle() {
+        var stateMachine = ShortcutStateMachine(configuration: .newInstallDefault)
+        _ = stateMachine.chordPressed()
+        _ = stateMachine.chordReleased()
+        XCTAssertEqual(stateMachine.chordPressed(), [.stopRecording])
+
+        XCTAssertEqual(stateMachine.externalRecordingStopped(), [])
+
+        // The release of the stopping tap does nothing; the tap after starts.
+        XCTAssertEqual(stateMachine.chordReleased(), [])
+        XCTAssertEqual(stateMachine.chordPressed(), [.scheduleHold])
+    }
+
+    func testExternalStopBeforeRecordingKeepsPendingGesture() {
+        var stateMachine = ShortcutStateMachine(configuration: .newInstallDefault)
+        XCTAssertEqual(stateMachine.chordPressed(), [.scheduleHold])
+
+        XCTAssertEqual(stateMachine.externalRecordingStopped(), [])
+
+        // A pending gesture is unrelated to the stopped recording.
+        XCTAssertEqual(stateMachine.holdThresholdElapsed(), [.startRecording])
+    }
+
+    func testTapRebuildReconciliationKeepsToggleRecordingStoppable() {
+        // HotkeyManager.start() applies cancelPendingGesture when it rebuilds
+        // a dead tap: a toggle recording must survive and stay stoppable.
+        var stateMachine = ShortcutStateMachine(configuration: .newInstallDefault)
+        _ = stateMachine.chordPressed()
+        _ = stateMachine.chordReleased()
+
+        XCTAssertEqual(stateMachine.cancelPendingGesture(), [])
+        XCTAssertEqual(stateMachine.chordPressed(), [.stopRecording])
+    }
+
+    func testTapRebuildReconciliationStopsHoldWhoseReleaseWasMissed() {
+        var stateMachine = ShortcutStateMachine(configuration: .newInstallDefault)
+        _ = stateMachine.chordPressed()
+        _ = stateMachine.holdThresholdElapsed()
+
+        XCTAssertEqual(stateMachine.cancelPendingGesture(), [.stopRecording])
+    }
+
     func testChordMaskIncludesEverySelectedPhysicalKey() {
         let configuration = ShortcutConfiguration(
             modifiers: [.leftOption, .rightOption, .rightCommand],

@@ -41,6 +41,13 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     var onboardingWindow: NSWindow?
     private var appState: AppState = .idle
 
+    /// Serializes recorder start/stop so a stop requested while a start is
+    /// still in flight runs after it instead of being dropped.
+    private var recordingFlow: Task<Void, Never>?
+    /// Bumped on every start/stop; stale transcription completions compare
+    /// against it before touching the indicator or app state.
+    private var recordingGeneration = 0
+
     /// Prevent App Nap from making the hotkey unresponsive
     private var activityToken: NSObjectProtocol?
 
@@ -110,9 +117,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     func applicationWillTerminate(_ notification: Notification) {
         hotkeyManager.stop()
-        if audioRecorder.isRecording {
-            _ = audioRecorder.stopRecording()
-        }
+        audioRecorder.stopForTermination()
         if let token = activityToken {
             ProcessInfo.processInfo.endActivity(token)
         }
@@ -136,42 +141,73 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     // MARK: - Recording Flow
 
     private func startRecording() {
-        indicatorModel.notice = nil
+        enqueueRecordingWork { await $0.performStartRecording() }
+    }
 
+    private func stopRecordingAndTranscribe() {
+        enqueueRecordingWork { await $0.performStopRecordingAndTranscribe() }
+    }
+
+    private func enqueueRecordingWork(
+        _ operation: @escaping @MainActor (AppDelegate) async -> Void
+    ) {
+        let previous = recordingFlow
+        recordingFlow = Task { [weak self] in
+            await previous?.value
+            guard let self else { return }
+            await operation(self)
+        }
+    }
+
+    private func performStartRecording() async {
+        guard !audioRecorder.isRecording else { return }
+        recordingGeneration += 1
+
+        indicatorModel.notice = nil
         do {
             var resolution = try audioInputDevices.resolutionForRecording()
-            do {
-                try audioRecorder.startRecording(deviceUID: resolution.deviceUID)
-            } catch let error as AudioRecorderError where error.shouldTryFallback {
-                resolution = try audioInputDevices.fallbackResolution(
-                    preferredName: resolution.name,
-                    excludingUID: resolution.deviceUID
-                )
-                try audioRecorder.startRecording(deviceUID: resolution.deviceUID)
-            }
 
+            // Show feedback immediately; the capture session starts on a
+            // background queue and can take a moment on some microphones.
             appState = .recording
             updateMenuBarIcon(state: .recording)
             spectrumSmoother.reset()
             indicatorModel.spectrumLevels = AudioSpectrum.silence
             showIndicator(state: .recording)
             indicatorModel.notice = resolution.fallbackNotice?.message
+
+            do {
+                try await audioRecorder.startRecording(deviceUID: resolution.deviceUID)
+            } catch let error as AudioRecorderError where error.shouldTryFallback {
+                resolution = try audioInputDevices.fallbackResolution(
+                    preferredName: resolution.name,
+                    excludingUID: resolution.deviceUID
+                )
+                indicatorModel.notice = resolution.fallbackNotice?.message
+                try await audioRecorder.startRecording(deviceUID: resolution.deviceUID)
+            }
+
             activeInputDeviceID = resolution.deviceID
             activeInputDeviceName = resolution.name
         } catch {
             print("Failed to start recording: \(error)")
+            appState = .idle
+            updateMenuBarIcon(state: .idle)
+            hotkeyManager.recordingWasStopped()
             showTransientWarning(error.localizedDescription)
         }
     }
 
-    private func stopRecordingAndTranscribe() {
+    private func performStopRecordingAndTranscribe() async {
         guard audioRecorder.isRecording else { return }
 
-        let samples = audioRecorder.stopRecording()
+        let samples = await audioRecorder.stopRecording()
         activeInputDeviceID = nil
         activeInputDeviceName = nil
         appState = .processing
         updateMenuBarIcon(state: .processing)
+        recordingGeneration += 1
+        let generation = recordingGeneration
 
         guard samples.count >= AudioRecorder.minimumSamples else {
             appState = .idle
@@ -187,28 +223,38 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         updateIndicator(state: .processing)
 
         Task {
+            // A new recording may start while transcription runs; only the
+            // latest generation may touch the indicator and app state.
             do {
                 // transcribe() waits for the model if it's still loading —
                 // the user just sees "Transcribing" a bit longer on first use
                 let text = try await transcriptionService.transcribe(audioSamples: samples)
                 if TranscriptionPostProcessor.isNonSpeechOnly(text) {
-                    showNonSpeechWarning(text)
+                    if generation == recordingGeneration {
+                        showNonSpeechWarning(text)
+                    }
                 } else {
                     transcriptionHistory.append(
                         text,
                         duration: AudioRecorder.duration(sampleCount: samples.count)
                     )
                     TextInserter.insertText(text)
-                    updateIndicator(state: .done(text: text))
-                    scheduleIndicatorDismissal(after: indicatorModel.notice == nil ? 1.5 : 4)
+                    if generation == recordingGeneration {
+                        updateIndicator(state: .done(text: text))
+                        scheduleIndicatorDismissal(after: indicatorModel.notice == nil ? 1.5 : 4)
+                    }
                 }
             } catch {
                 print("Transcription failed: \(error)")
-                dismissIndicator()
+                if generation == recordingGeneration {
+                    dismissIndicator()
+                }
             }
 
-            appState = .idle
-            updateMenuBarIcon(state: .idle)
+            if generation == recordingGeneration {
+                appState = .idle
+                updateMenuBarIcon(state: .idle)
+            }
         }
     }
 
@@ -226,6 +272,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             indicatorModel.notice =
                 "\(disconnectedName) disconnected. Recording stopped. No fallback microphone is available."
         }
+        // This stop bypasses the hotkey gesture; tell the state machine so the
+        // next gesture starts a recording instead of sending a stale stop.
+        hotkeyManager.recordingWasStopped()
         stopRecordingAndTranscribe()
     }
 
