@@ -138,7 +138,7 @@ private final class AudioCaptureDelegate: NSObject, AVCaptureAudioDataOutputSamp
 
 @MainActor
 final class AudioRecorder {
-    private static let sampleRate: Double = 16_000  // WhisperKit expects 16kHz mono
+    private nonisolated static let sampleRate: Double = 16_000  // WhisperKit expects 16kHz mono
 
     private(set) var isRecording = false
 
@@ -146,15 +146,91 @@ final class AudioRecorder {
         label: "Inputalk.AudioCapture",
         qos: .userInitiated
     )
-    private var captureSession: AVCaptureSession?
-    private var captureOutput: AVCaptureAudioDataOutput?
-    private var captureDelegate: AudioCaptureDelegate?
+    private let capture = CaptureResources()
     private let collector = AudioSampleCollector(sampleRate: Float(sampleRate))
 
-    func startRecording(deviceUID: String) throws {
+    /// Starts capture on the capture queue. AVCaptureSession.startRunning is a
+    /// blocking call that can take seconds on some devices; keeping it off the
+    /// main thread keeps the hotkey event tap responsive (an unresponsive tap
+    /// gets disabled by macOS).
+    func startRecording(deviceUID: String) async throws {
         guard !isRecording else { return }
 
-        guard let device = Self.captureDevice(uid: deviceUID) else {
+        collector.reset()
+        let capture = capture
+        let collector = collector
+        let captureQueue = captureQueue
+        try await withCheckedThrowingContinuation {
+            (continuation: CheckedContinuation<Void, any Error>) in
+            captureQueue.async {
+                do {
+                    try Self.startCapture(
+                        deviceUID: deviceUID,
+                        capture: capture,
+                        collector: collector,
+                        sampleQueue: captureQueue
+                    )
+                    continuation.resume()
+                } catch {
+                    continuation.resume(throwing: error)
+                }
+            }
+        }
+        isRecording = true
+    }
+
+    func stopRecording() async -> [Float] {
+        guard isRecording else { return [] }
+        isRecording = false
+
+        let capture = capture
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            captureQueue.async {
+                Self.tearDownCapture(capture)
+                continuation.resume()
+            }
+        }
+        // Sample callbacks run on the capture queue, so every buffer enqueued
+        // before the teardown has been appended by the time we drain.
+        return collector.drain()
+    }
+
+    /// Best-effort synchronous teardown for app termination.
+    func stopForTermination() {
+        guard isRecording else { return }
+        isRecording = false
+        let capture = capture
+        captureQueue.sync {
+            Self.tearDownCapture(capture)
+        }
+    }
+
+    func currentSpectrumLevels() -> [Float] {
+        collector.spectrumLevels()
+    }
+
+    /// Minimum number of samples for a valid recording (0.5s at 16kHz)
+    static let minimumSamples = 8000
+
+    static func duration(sampleCount: Int) -> TimeInterval {
+        Double(sampleCount) / sampleRate
+    }
+
+    private nonisolated static func captureDevice(uid: String) -> AVCaptureDevice? {
+        AVCaptureDevice.DiscoverySession(
+            deviceTypes: [.microphone, .external],
+            mediaType: .audio,
+            position: .unspecified
+        ).devices.first { $0.uniqueID == uid }
+    }
+
+    private nonisolated static func startCapture(
+        deviceUID: String,
+        capture: CaptureResources,
+        collector: AudioSampleCollector,
+        sampleQueue: DispatchQueue
+    ) throws {
+        guard let device = captureDevice(uid: deviceUID) else {
             throw AudioRecorderError.deviceUnavailable(deviceUID)
         }
 
@@ -182,67 +258,43 @@ final class AudioRecorder {
         session.addOutput(output)
         output.audioSettings = [
             AVFormatIDKey: kAudioFormatLinearPCM,
-            AVSampleRateKey: Self.sampleRate,
+            AVSampleRateKey: sampleRate,
             AVNumberOfChannelsKey: 1,
             AVLinearPCMBitDepthKey: 32,
             AVLinearPCMIsFloatKey: true,
             AVLinearPCMIsBigEndianKey: false,
             AVLinearPCMIsNonInterleaved: false,
         ]
-        output.setSampleBufferDelegate(delegate, queue: captureQueue)
+        output.setSampleBufferDelegate(delegate, queue: sampleQueue)
         session.commitConfiguration()
 
-        collector.reset()
-        captureSession = session
-        captureOutput = output
-        captureDelegate = delegate
+        capture.session = session
+        capture.output = output
+        capture.delegate = delegate
 
         session.startRunning()
         guard session.isRunning else {
-            tearDownCapture()
+            tearDownCapture(capture)
             throw AudioRecorderError.captureFailed
         }
-        isRecording = true
     }
 
-    func stopRecording() -> [Float] {
-        guard isRecording else { return [] }
-
-        tearDownCapture()
-        isRecording = false
-
-        return collector.drain()
+    private nonisolated static func tearDownCapture(_ capture: CaptureResources) {
+        capture.output?.setSampleBufferDelegate(nil, queue: nil)
+        capture.session?.stopRunning()
+        capture.session = nil
+        capture.output = nil
+        capture.delegate = nil
     }
+}
 
-    func currentSpectrumLevels() -> [Float] {
-        collector.spectrumLevels()
-    }
-
-    /// Minimum number of samples for a valid recording (0.5s at 16kHz)
-    static let minimumSamples = 8000
-
-    static func duration(sampleCount: Int) -> TimeInterval {
-        Double(sampleCount) / sampleRate
-    }
-
-    private static func captureDevice(uid: String) -> AVCaptureDevice? {
-        AVCaptureDevice.DiscoverySession(
-            deviceTypes: [.microphone, .external],
-            mediaType: .audio,
-            position: .unspecified
-        ).devices.first { $0.uniqueID == uid }
-    }
-
-    private func tearDownCapture() {
-        captureOutput?.setSampleBufferDelegate(nil, queue: nil)
-        captureSession?.stopRunning()
-        captureQueue.sync {
-            // Wait for already-enqueued sample callbacks before draining the collector.
-        }
-        captureSession = nil
-        captureOutput = nil
-        captureDelegate = nil
-    }
+/// Holds the live AVCapture objects. Every access happens on the capture queue
+/// (the main actor only retains the container), which is what makes the
+/// unchecked Sendable claim sound.
+private final class CaptureResources: @unchecked Sendable {
+    var session: AVCaptureSession?
+    var output: AVCaptureAudioDataOutput?
+    var delegate: AudioCaptureDelegate?
 }
 
 enum AudioRecorderError: LocalizedError {

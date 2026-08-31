@@ -289,6 +289,19 @@ struct ShortcutStateMachine {
         ordinaryKeyPressed()
     }
 
+    /// The app stopped recording without a hotkey gesture (microphone
+    /// disconnect, failed capture start). Recording phases return to idle so
+    /// the next gesture starts fresh instead of sending a stale stop.
+    mutating func externalRecordingStopped() -> [ShortcutEffect] {
+        switch phase {
+        case .holdRecording, .toggleRecording, .stoppingToggle:
+            phase = .idle
+            return []
+        case .idle, .chordPending, .waitingForSecondTap:
+            return []
+        }
+    }
+
     mutating func reset() -> [ShortcutEffect] {
         var effects: [ShortcutEffect] = [.cancelHold, .cancelDoubleTapTimeout]
         if phase == .holdRecording || phase == .toggleRecording {
