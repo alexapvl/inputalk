@@ -1,6 +1,16 @@
 import AppKit
 import Carbon.HIToolbox
 
+/// HIToolbox caches AppleFnUsageType. Writing the pref does not change Globe/Fn
+/// until this private call flushes that cache.
+@_silgen_name("TISUpdateFnUsageType")
+private func TISUpdateFnUsageType(_ value: Int32)
+
+private enum FnUsageType: Int32 {
+    case doNothing = 0
+    case showEmojiAndSymbols = 2
+}
+
 /// Monitors an exact chord of physical modifier keys and turns tap, double-tap,
 /// and hold gestures into recording actions.
 @MainActor
@@ -222,7 +232,8 @@ final class HotkeyManager {
         guard let defaults = UserDefaults(suiteName: "com.apple.HIToolbox") else { return }
         hadOriginalFnUsageType = defaults.object(forKey: "AppleFnUsageType") != nil
         originalFnUsageType = defaults.object(forKey: "AppleFnUsageType") as? Int
-        defaults.set(0, forKey: "AppleFnUsageType")
+        defaults.set(Int(FnUsageType.doNothing.rawValue), forKey: "AppleFnUsageType")
+        TISUpdateFnUsageType(FnUsageType.doNothing.rawValue)
         isOverridingFnBehavior = true
     }
 
@@ -232,8 +243,11 @@ final class HotkeyManager {
 
         if hadOriginalFnUsageType, let originalFnUsageType {
             defaults.set(originalFnUsageType, forKey: "AppleFnUsageType")
+            TISUpdateFnUsageType(Int32(originalFnUsageType))
         } else {
             defaults.removeObject(forKey: "AppleFnUsageType")
+            // Absent key means Globe's factory action: emoji & symbols.
+            TISUpdateFnUsageType(FnUsageType.showEmojiAndSymbols.rawValue)
         }
         originalFnUsageType = nil
         hadOriginalFnUsageType = false
