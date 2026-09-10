@@ -43,28 +43,60 @@ enum ModelLifecycle {
             .appendingPathComponent(folderName(for: variant))
     }
 
+    static func hubCacheFolder(for variant: String, modelsDirectory: URL) -> URL {
+        modelsDirectory
+            .appendingPathComponent(hubRepoPath)
+            .appendingPathComponent(".cache/huggingface/download")
+            .appendingPathComponent(folderName(for: variant))
+    }
+
     static func isInstalled(
         variant: String,
         modelsDirectory: URL,
-        fileExists: (URL) -> Bool = { FileManager.default.fileExists(atPath: $0.path) }
+        fileExists: (URL) -> Bool = { defaultFileExists($0) }
     ) -> Bool {
         let folder = modelFolder(for: variant, modelsDirectory: modelsDirectory)
         return requiredModelNames.allSatisfy { name in
-            fileExists(folder.appendingPathComponent("\(name).mlmodelc"))
-                || fileExists(
-                    folder.appendingPathComponent(
-                        "\(name).mlpackage/Data/com.apple.CoreML/model.mlmodel"
-                    )
-                )
+            compiledModelIsComplete(named: name, in: folder, fileExists: fileExists)
         }
+    }
+
+    static func compiledModelIsComplete(
+        named name: String,
+        in folder: URL,
+        fileExists: (URL) -> Bool = { defaultFileExists($0) }
+    ) -> Bool {
+        let bundle = folder.appendingPathComponent("\(name).mlmodelc")
+        return fileExists(bundle.appendingPathComponent("model.mil"))
+            && fileExists(bundle.appendingPathComponent("coremldata.bin"))
     }
 
     static func shouldDownload(
         variant: String,
         modelsDirectory: URL,
-        fileExists: (URL) -> Bool = { FileManager.default.fileExists(atPath: $0.path) }
+        fileExists: (URL) -> Bool = { defaultFileExists($0) }
     ) -> Bool {
         !isInstalled(variant: variant, modelsDirectory: modelsDirectory, fileExists: fileExists)
+    }
+
+    static func removeInstall(
+        variant: String,
+        modelsDirectory: URL,
+        removeItem: (URL) throws -> Void = { try FileManager.default.removeItem(at: $0) }
+    ) {
+        for url in [
+            modelFolder(for: variant, modelsDirectory: modelsDirectory),
+            hubCacheFolder(for: variant, modelsDirectory: modelsDirectory),
+        ] {
+            try? removeItem(url)
+        }
+    }
+
+    static func defaultFileExists(_ url: URL) -> Bool {
+        guard let values = try? url.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey]),
+            values.isRegularFile == true
+        else { return false }
+        return (values.fileSize ?? 0) > 0
     }
 
     static func shouldReuseLoadedModel(selected: String, loaded: String?) -> Bool {
