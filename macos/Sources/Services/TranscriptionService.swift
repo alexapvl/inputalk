@@ -1,14 +1,6 @@
 @preconcurrency import WhisperKit
 import Foundation
 
-enum ModelState: Equatable {
-    case unloaded
-    case downloading(progress: Double)
-    case loading
-    case ready
-    case error(String)
-}
-
 @MainActor
 class TranscriptionService: ObservableObject {
     @Published var modelState: ModelState = .unloaded
@@ -21,6 +13,9 @@ class TranscriptionService: ObservableObject {
     let availableModels = ["tiny", "base", "small", "medium"]
 
     private var whisperKit: WhisperKit?
+    private var loadedModel: String?
+    private var loadGeneration = 0
+    private var prewarmedVariants: Set<String> = []
 
     /// All model data lives here.
     /// App cleaners remove ~/Library/Application Support/<bundleID>/ on uninstall.
@@ -38,86 +33,192 @@ class TranscriptionService: ObservableObject {
         return ByteCountFormatter.string(fromByteCount: Int64(bytes), countStyle: .file)
     }
 
+    var recordingBlockMessage: String? {
+        ModelLifecycle.recordingBlockMessage(selected: selectedModel, loaded: loadedModel)
+    }
+
+    var recordingPrepareNotice: String? {
+        ModelLifecycle.recordingPrepareNotice(
+            selected: selectedModel,
+            loaded: loadedModel,
+            isPreparing: modelState.isPreparing
+        )
+    }
+
     init() {
         self.selectedModel = UserDefaults.standard.string(forKey: "selectedModel") ?? "base"
     }
 
     func loadModel() async {
-        guard modelState != .loading else { return }
-        if case .downloading = modelState { return }
-
-        modelState = .downloading(progress: 0)
-        whisperKit = nil
-
-        // Ensure our models directory exists
-        try? FileManager.default.createDirectory(
-            at: Self.modelsDirectory, withIntermediateDirectories: true)
-
-        do {
-            // Step 1: Download model into our app-specific directory
-            let progressCallback: @Sendable (Progress) -> Void = { [weak self] progress in
-                let fraction = progress.fractionCompleted
-                Task { @MainActor [weak self] in
-                    self?.modelState = .downloading(progress: fraction)
-                }
-            }
-            let modelFolder = try await WhisperKit.download(
-                variant: selectedModel,
-                downloadBase: Self.modelsDirectory,
-                progressCallback: progressCallback
-            )
-
-            // Step 2: Load from downloaded folder
-            modelState = .loading
-            let kit = try await WhisperKit(
-                modelFolder: modelFolder.path,
-                verbose: false,
-                prewarm: true,
-                load: true,
-                download: false
-            )
-            whisperKit = kit
-            modelState = .ready
-        } catch {
-            modelState = .error(error.localizedDescription)
-        }
+        loadGeneration += 1
+        let generation = loadGeneration
+        let variant = selectedModel
+        await runLoad(variant: variant, generation: generation)
     }
 
     /// Delete all downloaded models from disk.
     func deleteAllModels() {
+        loadGeneration += 1
         whisperKit = nil
+        loadedModel = nil
+        prewarmedVariants = []
         modelState = .unloaded
         try? FileManager.default.removeItem(at: Self.modelsDirectory)
     }
 
-    /// Wait until the model is ready. If nothing is loading yet, kicks off a load.
+    private func isLatest(_ generation: Int) -> Bool {
+        ModelLifecycle.shouldPublish(requestID: generation, latestRequestID: loadGeneration)
+    }
+
+    private func isCurrent(_ generation: Int) -> Bool {
+        isLatest(generation) && !Task.isCancelled
+    }
+
+    private func runLoad(variant: String, generation: Int) async {
+        guard isCurrent(generation) else { return }
+
+        if ModelLifecycle.shouldReuseLoadedModel(selected: variant, loaded: loadedModel),
+            whisperKit != nil
+        {
+            modelState = .ready
+            return
+        }
+
+        modelState = .checking
+        try? FileManager.default.createDirectory(
+            at: Self.modelsDirectory, withIntermediateDirectories: true)
+
+        let checkStart = CFAbsoluteTimeGetCurrent()
+        let needsDownload = ModelLifecycle.shouldDownload(
+            variant: variant,
+            modelsDirectory: Self.modelsDirectory
+        )
+        let checkMs = (CFAbsoluteTimeGetCurrent() - checkStart) * 1000
+
+        do {
+            let modelFolder: URL
+            var downloadMs: Double?
+
+            if needsDownload {
+                guard isCurrent(generation) else { return }
+                modelState = .downloading(progress: 0)
+                let downloadStart = CFAbsoluteTimeGetCurrent()
+                let progressCallback: @Sendable (Progress) -> Void = { [weak self] progress in
+                    let fraction = progress.fractionCompleted
+                    Task { @MainActor [weak self] in
+                        guard let self, self.isLatest(generation) else { return }
+                        self.modelState = .downloading(progress: fraction)
+                    }
+                }
+                modelFolder = try await WhisperKit.download(
+                    variant: variant,
+                    downloadBase: Self.modelsDirectory,
+                    progressCallback: progressCallback
+                )
+                downloadMs = (CFAbsoluteTimeGetCurrent() - downloadStart) * 1000
+            } else {
+                modelFolder = ModelLifecycle.modelFolder(
+                    for: variant,
+                    modelsDirectory: Self.modelsDirectory
+                )
+            }
+
+            try Task.checkCancellation()
+            guard isCurrent(generation) else { return }
+
+            let kit = try await WhisperKit(
+                modelFolder: modelFolder.path,
+                verbose: false,
+                prewarm: false,
+                load: false,
+                download: false
+            )
+
+            try Task.checkCancellation()
+            guard isCurrent(generation) else { return }
+
+            // Core ML device specialization can take minutes on the first Small
+            // or Medium load. WhisperKit prewarm does that pass, unloads, then
+            // loadModels reads the cache. Skip prewarm for variants already
+            // specialized this process so switching back is not 2x.
+            // ponytail: in-flight WhisperKit loads are ignored, not cancelled;
+            // Core ML specialization still runs until it finishes.
+            var prewarmS: Double?
+            if !prewarmedVariants.contains(variant) {
+                modelState = .optimizing
+                let prewarmStart = CFAbsoluteTimeGetCurrent()
+                try await kit.prewarmModels()
+                prewarmS = CFAbsoluteTimeGetCurrent() - prewarmStart
+                prewarmedVariants.insert(variant)
+            }
+
+            try Task.checkCancellation()
+            guard isCurrent(generation) else { return }
+
+            modelState = .loading
+            let loadStart = CFAbsoluteTimeGetCurrent()
+            try await kit.loadModels()
+            let loadS = CFAbsoluteTimeGetCurrent() - loadStart
+
+            try Task.checkCancellation()
+            guard isCurrent(generation) else { return }
+
+            whisperKit = kit
+            loadedModel = variant
+            modelState = .ready
+            logModelLoad(
+                variant: variant,
+                checkMs: checkMs,
+                downloadMs: downloadMs,
+                prewarmS: prewarmS,
+                loadS: loadS,
+                timings: kit.currentTimings
+            )
+        } catch is CancellationError {
+            return
+        } catch {
+            guard isCurrent(generation) else { return }
+            modelState = .error(error.localizedDescription)
+        }
+    }
+
+    private func logModelLoad(
+        variant: String,
+        checkMs: Double,
+        downloadMs: Double?,
+        prewarmS: Double?,
+        loadS: Double,
+        timings: TranscriptionTimings
+    ) {
+        let download = downloadMs.map { String(format: "%.0fms", $0) } ?? "skipped"
+        let prewarm = prewarmS.map { String(format: "%.2fs", $0) } ?? "skipped"
+        print(
+            "[ModelLoad] \(variant) check=\(String(format: "%.0f", checkMs))ms download=\(download) prewarm=\(prewarm) load=\(String(format: "%.2f", loadS))s encoder=\(String(format: "%.2f", timings.encoderLoadTime))s decoder=\(String(format: "%.2f", timings.decoderLoadTime))s encoderSpec=\(String(format: "%.2f", timings.encoderSpecializationTime))s decoderSpec=\(String(format: "%.2f", timings.decoderSpecializationTime))s tokenizer=\(String(format: "%.2f", timings.tokenizerLoadTime))s"
+        )
+    }
+
+    /// Wait until a usable model is in memory. If one is already loaded, returns
+    /// immediately even when a different variant is still preparing.
     func waitUntilReady() async throws {
-        if modelState == .ready { return }
+        if whisperKit != nil { return }
 
-        // If idle or errored, start a fresh load
-        let needsLoad: Bool
         switch modelState {
-        case .unloaded, .error: needsLoad = true
-        default: needsLoad = false
-        }
-        if needsLoad {
-            Task { await loadModel() }
-            // Give loadModel a moment to set its state
-            try await Task.sleep(nanoseconds: 100_000_000)
+        case .unloaded, .error:
+            await loadModel()
+        default:
+            break
         }
 
-        // Poll until ready or terminal error
-        while true {
-            if modelState == .ready { return }
+        while whisperKit == nil {
             if case .error(let msg) = modelState {
                 throw TranscriptionError.modelLoadFailed(msg)
             }
+            try Task.checkCancellation()
             try await Task.sleep(nanoseconds: 200_000_000)
         }
     }
 
     func transcribe(audioSamples: [Float]) async throws -> String {
-        // Wait for model if it's still downloading/loading
         try await waitUntilReady()
 
         guard let kit = whisperKit else {
