@@ -62,6 +62,12 @@ final class ModelLifecycleTests: XCTestCase {
         )
     }
 
+    func testPercentTextUsesCompletedStages() {
+        XCTAssertEqual(ModelLifecycle.percentText(from: 0), "0%")
+        XCTAssertEqual(ModelLifecycle.percentText(from: 0.33), "33%")
+        XCTAssertEqual(ModelLifecycle.percentText(from: 1), "100%")
+    }
+
     private func makeTempModelsDirectory() throws -> URL {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("inputalk-model-lifecycle-\(UUID().uuidString)")

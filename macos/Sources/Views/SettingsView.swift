@@ -210,6 +210,10 @@ struct SettingsView: View {
                 Spacer()
                 Text(modelStatusText)
                     .foregroundStyle(.secondary)
+                if transcription.modelState.showsSpinner {
+                    ProgressView()
+                        .controlSize(.small)
+                }
                 if case .error = transcription.modelState {
                     Button("Retry") {
                         Task { await transcription.loadModel() }
@@ -509,9 +513,9 @@ struct SettingsView: View {
         switch transcription.modelState {
         case .ready: return "Ready"
         case .checking: return "Checking..."
-        case .loading: return "Loading..."
-        case .optimizing: return "Optimizing for this Mac..."
-        case .downloading(let p): return "Downloading \(Int(p * 100))%"
+        case .loading(let p): return "Loading \(ModelLifecycle.percentText(from: p))"
+        case .optimizing(let p): return "Optimizing for this Mac \(ModelLifecycle.percentText(from: p))"
+        case .downloading(let p): return "Downloading \(ModelLifecycle.percentText(from: p))"
         case .error(let msg): return msg
         case .unloaded: return "Not loaded"
         }

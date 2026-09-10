@@ -301,19 +301,21 @@ struct OnboardingView: View {
             }
         case .checking:
             onboardingBusyStatus("Checking for model...")
-        case .loading:
-            onboardingBusyStatus("Loading model...")
-        case .optimizing:
-            onboardingBusyStatus("Optimizing for this Mac...")
+        case .loading(let progress):
+            onboardingProgressStatus(
+                "Loading model \(ModelLifecycle.percentText(from: progress))",
+                progress: progress
+            )
+        case .optimizing(let progress):
+            onboardingProgressStatus(
+                "Optimizing for this Mac \(ModelLifecycle.percentText(from: progress))",
+                progress: progress
+            )
         case .downloading(let progress):
-            VStack(spacing: 12) {
-                Text("Downloading \"\(transcription.selectedModel)\" - \(Int(progress * 100))%")
-                    .font(.system(size: 13))
-                    .foregroundStyle(Color.white.opacity(0.4))
-                ProgressView(value: progress)
-                    .tint(.white)
-                    .frame(width: 200)
-            }
+            onboardingProgressStatus(
+                "Downloading \"\(transcription.selectedModel)\" \(ModelLifecycle.percentText(from: progress))",
+                progress: progress
+            )
         case .error(let msg):
             VStack(spacing: 8) {
                 Text(msg)
@@ -337,6 +339,18 @@ struct OnboardingView: View {
             ProgressView()
                 .controlSize(.small)
                 .tint(.white)
+        }
+    }
+
+    @ViewBuilder
+    private func onboardingProgressStatus(_ message: String, progress: Double) -> some View {
+        VStack(spacing: 12) {
+            Text(message)
+                .font(.system(size: 13))
+                .foregroundStyle(Color.white.opacity(0.4))
+            ProgressView(value: progress)
+                .tint(.white)
+                .frame(width: 200)
         }
     }
 

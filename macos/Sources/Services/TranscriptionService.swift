@@ -142,12 +142,14 @@ class TranscriptionService: ObservableObject {
             // loadModels reads the cache. Skip prewarm for variants already
             // specialized this process so switching back is not 2x.
             // ponytail: in-flight WhisperKit loads are ignored, not cancelled;
-            // Core ML specialization still runs until it finishes.
+            // Core ML specialization still runs until it finishes. Percent is
+            // completed compiled-model stages, not a Core ML byte/time callback.
             var prewarmS: Double?
             if !prewarmedVariants.contains(variant) {
-                modelState = .optimizing
                 let prewarmStart = CFAbsoluteTimeGetCurrent()
-                try await kit.prewarmModels()
+                try await runCompiledModelPass(kit: kit, prewarm: true, generation: generation)
+                try Task.checkCancellation()
+                guard isCurrent(generation) else { return }
                 prewarmS = CFAbsoluteTimeGetCurrent() - prewarmStart
                 prewarmedVariants.insert(variant)
             }
@@ -155,9 +157,8 @@ class TranscriptionService: ObservableObject {
             try Task.checkCancellation()
             guard isCurrent(generation) else { return }
 
-            modelState = .loading
             let loadStart = CFAbsoluteTimeGetCurrent()
-            try await kit.loadModels()
+            try await runCompiledModelPass(kit: kit, prewarm: false, generation: generation)
             let loadS = CFAbsoluteTimeGetCurrent() - loadStart
 
             try Task.checkCancellation()
@@ -171,8 +172,7 @@ class TranscriptionService: ObservableObject {
                 checkMs: checkMs,
                 downloadMs: downloadMs,
                 prewarmS: prewarmS,
-                loadS: loadS,
-                timings: kit.currentTimings
+                loadS: loadS
             )
         } catch is CancellationError {
             return
@@ -182,18 +182,97 @@ class TranscriptionService: ObservableObject {
         }
     }
 
+    /// Same model order as WhisperKit.loadModels. Each compiled model is a black
+    /// box to Core ML, so progress only advances when a stage finishes.
+    private func runCompiledModelPass(
+        kit: WhisperKit,
+        prewarm: Bool,
+        generation: Int
+    ) async throws {
+        guard let path = kit.modelFolder else {
+            throw WhisperError.modelsUnavailable("Model folder is not set.")
+        }
+
+        let logmelUrl = ModelUtilities.detectModelURL(inFolder: path, named: "MelSpectrogram")
+        let encoderUrl = ModelUtilities.detectModelURL(inFolder: path, named: "AudioEncoder")
+        let decoderUrl = ModelUtilities.detectModelURL(inFolder: path, named: "TextDecoder")
+
+        for item in [logmelUrl, encoderUrl, decoderUrl] {
+            if !FileManager.default.fileExists(atPath: item.path) {
+                throw WhisperError.modelsUnavailable("Model file not found at \(item.path)")
+            }
+        }
+
+        let total = 3 + (prewarm ? 0 : 1)
+        var completed = 0
+
+        func publish() {
+            let progress = Double(completed) / Double(max(total, 1))
+            if prewarm {
+                modelState = .optimizing(progress: progress)
+            } else {
+                modelState = .loading(progress: progress)
+            }
+        }
+
+        publish()
+
+        if let featureExtractor = kit.featureExtractor as? WhisperMLModel {
+            try await featureExtractor.loadModel(
+                at: logmelUrl,
+                computeUnits: kit.modelCompute.melCompute,
+                prewarmMode: prewarm
+            )
+        }
+        completed += 1
+        try Task.checkCancellation()
+        guard isCurrent(generation) else { return }
+        publish()
+
+        if let textDecoder = kit.textDecoder as? WhisperMLModel {
+            try await textDecoder.loadModel(
+                at: decoderUrl,
+                computeUnits: kit.modelCompute.textDecoderCompute,
+                prewarmMode: prewarm
+            )
+        }
+        completed += 1
+        try Task.checkCancellation()
+        guard isCurrent(generation) else { return }
+        publish()
+
+        if let audioEncoder = kit.audioEncoder as? WhisperMLModel {
+            try await audioEncoder.loadModel(
+                at: encoderUrl,
+                computeUnits: kit.modelCompute.audioEncoderCompute,
+                prewarmMode: prewarm
+            )
+        }
+        completed += 1
+        try Task.checkCancellation()
+        guard isCurrent(generation) else { return }
+        publish()
+
+        if !prewarm {
+            try await kit.loadTokenizerIfNeeded()
+            completed += 1
+            try Task.checkCancellation()
+            guard isCurrent(generation) else { return }
+            publish()
+        }
+    }
+
     private func logModelLoad(
         variant: String,
         checkMs: Double,
         downloadMs: Double?,
         prewarmS: Double?,
-        loadS: Double,
-        timings: TranscriptionTimings
+        loadS: Double
     ) {
         let download = downloadMs.map { String(format: "%.0fms", $0) } ?? "skipped"
         let prewarm = prewarmS.map { String(format: "%.2fs", $0) } ?? "skipped"
         print(
-            "[ModelLoad] \(variant) check=\(String(format: "%.0f", checkMs))ms download=\(download) prewarm=\(prewarm) load=\(String(format: "%.2f", loadS))s encoder=\(String(format: "%.2f", timings.encoderLoadTime))s decoder=\(String(format: "%.2f", timings.decoderLoadTime))s encoderSpec=\(String(format: "%.2f", timings.encoderSpecializationTime))s decoderSpec=\(String(format: "%.2f", timings.decoderSpecializationTime))s tokenizer=\(String(format: "%.2f", timings.tokenizerLoadTime))s"
+            "[ModelLoad] \(variant) check=\(String(format: "%.0f", checkMs))ms download=\(download) prewarm=\(prewarm) load=\(String(format: "%.2f", loadS))s"
         )
     }
 

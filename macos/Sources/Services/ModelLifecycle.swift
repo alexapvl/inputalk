@@ -4,8 +4,8 @@ enum ModelState: Equatable {
     case unloaded
     case checking
     case downloading(progress: Double)
-    case optimizing
-    case loading
+    case optimizing(progress: Double)
+    case loading(progress: Double)
     case ready
     case error(String)
 
@@ -13,6 +13,13 @@ enum ModelState: Equatable {
         switch self {
         case .checking, .downloading, .optimizing, .loading: true
         case .unloaded, .ready, .error: false
+        }
+    }
+
+    var showsSpinner: Bool {
+        switch self {
+        case .checking, .downloading, .optimizing, .loading: true
+        default: false
         }
     }
 }
@@ -80,5 +87,11 @@ enum ModelLifecycle {
     ) -> String? {
         guard isPreparing, let loaded, loaded != selected else { return nil }
         return "Preparing \(displayName(for: selected)) - using \(displayName(for: loaded))"
+    }
+
+    /// Core ML does not report load progress. This is completed stages / total stages.
+    static func percentText(from progress: Double) -> String {
+        let clamped = min(max(progress, 0), 1)
+        return "\(Int((clamped * 100).rounded()))%"
     }
 }
